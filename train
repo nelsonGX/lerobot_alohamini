@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Train on a locally recorded dataset (run on the GPU server).
+# Usage: ./train <dataset_name> [policy_type=act] [extra lerobot-train args...]
+#   e.g. ./train me/pick_cube act --steps=50000 --batch_size=32
+set -euo pipefail
+cd "$(dirname "$0")"
+DATASET="${1:?usage: ./train <dataset_name> [policy_type] [extra args]}"
+POLICY="${2:-act}"
+shift $(( $# < 2 ? $# : 2 ))
+uv run lerobot-train \
+  --dataset.repo_id="$DATASET" \
+  --policy.type="$POLICY" \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --output_dir="outputs/train/$(basename "$DATASET")_$POLICY" \
+  "$@"

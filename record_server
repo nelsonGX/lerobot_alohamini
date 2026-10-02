@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Record on the GPU server; the robot host (./host) runs on the Jetson.
+# Usage: JETSON_IP=192.168.x.x ./record_server <dataset_name> "<task description>" [extra record_bi.py args...]
+#   e.g. JETSON_IP=192.168.1.50 ./record_server me/pick_cube "pick up the cube" --num_episodes 20
+set -euo pipefail
+cd "$(dirname "$0")"
+: "${JETSON_IP:?set JETSON_IP to the address of the Jetson}"
+DATASET="${1:?usage: ./record_server DATASET TASK [extra args]}"
+TASK="${2:?missing task description}"
+shift 2
+uv run python examples/alohamini/record_bi.py \
+  --robot.remote_ip "$JETSON_IP" --robot.robot_model alohamini1 \
+  --teleop.id so101_leader_bi --teleop.arm_profile so-arm-5dof \
+  --dataset.repo_id "$DATASET" --dataset.single_task "$TASK" \
+  --push_to_hub false "$@"
