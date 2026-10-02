@@ -147,7 +147,10 @@ class LiftAxis:
     # Lightweight coupling with action/obs
     def contribute_observation(self, obs: Dict[str, float]) -> None:
         """Export convenient observation fields: height_mm and velocity"""
-        if not self.enabled: return
+        if not self.enabled:
+            # Keep the state schema stable when the lift is not connected.
+            obs[f"{self.cfg.name}.height_mm"] = 0.0
+            return
         obs[f"{self.cfg.name}.height_mm"] = self.get_height_mm()
         try:
             obs[f"{self.cfg.name}.vel"] = int(self._bus.read("Present_Velocity", self.cfg.name, normalize=False))

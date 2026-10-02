@@ -1,4 +1,5 @@
 import argparse
+import os
 import time
 
 from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
@@ -62,11 +63,18 @@ parser.add_argument(
     help="Leader arm profile selector.",
 )
 
+parser.add_argument(
+    "--no_display",
+    action="store_true",
+    help="Do not start the Rerun viewer (automatic when no display is available).",
+)
+
 args = parser.parse_args()
 
 NO_ROBOT = args.no_robot
 NO_LEADER = args.no_leader
 FPS = args.fps
+DISPLAY = not args.no_display and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 CAMERA_FPS = args.camera_fps
 if FPS <= 0 or CAMERA_FPS <= 0:
     parser.error("--fps and --camera-fps must be positive")
@@ -89,10 +97,14 @@ bi_cfg = BiSOLeaderConfig(
     left_arm_config=SOLeaderConfig(
         port="/dev/am_arm_leader_left",
         arm_profile=args.arm_profile,
+        # Match the AlohaMini follower's -100..100 range (it uses use_degrees=False).
+        use_degrees=False,
     ),
     right_arm_config=SOLeaderConfig(
         port="/dev/am_arm_leader_right",
         arm_profile=args.arm_profile,
+        # Match the AlohaMini follower's -100..100 range (it uses use_degrees=False).
+        use_degrees=False,
     ),
     id=args.leader_id,
 )
@@ -116,7 +128,12 @@ keyboard.connect()
 
 
 
-init_rerun(session_name="alohamini_teleop")
+if DISPLAY:
+    init_rerun(session_name="alohamini_teleop")
+else:
+    print("No display: Rerun viewer disabled.")
+if not keyboard.is_connected:
+    print("Keyboard unavailable: base and lift keyboard control disabled.")
 
 if not robot.is_connected or not leader.is_connected or not keyboard.is_connected:
     print("⚠️ Warning: Some devices are not connected! Still running for debug.")
@@ -136,12 +153,13 @@ while True:
     )
     arm_actions = leader.get_action() if not NO_LEADER else {}
     arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
-    keyboard_keys = keyboard.get_action()
+    keyboard_keys = keyboard.get_action() if keyboard.is_connected else {}
     base_action = robot._from_keyboard_to_base_action(keyboard_keys)
     lift_action = robot._from_keyboard_to_lift_action(keyboard_keys)
 
     action = {**arm_actions, **base_action, **lift_action}
-    log_rerun_data(observation, action)
+    if DISPLAY:
+        log_rerun_data(observation, action)
 
     if not NO_ROBOT:
         robot.send_action(action)

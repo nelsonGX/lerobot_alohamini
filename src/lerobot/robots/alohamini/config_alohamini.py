@@ -81,6 +81,10 @@ class AlohaMiniConfig(RobotConfig):
     # Use together with --no_leader on the teleoperate side for base-only teleoperation.
     no_follower: bool = False
 
+    # When True, skip the mobile base wheels (IDs 8-10) and lift axis (ID 11); only the
+    # follower arms operate. Base velocity and lift height are reported as 0.
+    no_base: bool = False
+
     def __post_init__(self) -> None:
         super().__post_init__()
         if not 1 <= self.arm_goal_velocity <= 3400:

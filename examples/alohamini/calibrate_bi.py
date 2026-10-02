@@ -59,10 +59,14 @@ def main() -> None:
             left_arm_config=SOLeaderConfig(
                 port="/dev/am_arm_leader_left",
                 arm_profile=args.arm_profile,
+                # Match the AlohaMini follower's -100..100 range (it uses use_degrees=False).
+                use_degrees=False,
             ),
             right_arm_config=SOLeaderConfig(
                 port="/dev/am_arm_leader_right",
                 arm_profile=args.arm_profile,
+                # Match the AlohaMini follower's -100..100 range (it uses use_degrees=False).
+                use_degrees=False,
             ),
             id=args.leader_id,
         )

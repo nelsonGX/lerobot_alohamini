@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import math
+import sys
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -29,6 +30,8 @@ from .alohamini import AlohaMini
 from .camera_stream import CameraStreamPublisher
 from .command_owner import CommandOwner
 from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
+from .engage_gate import ArmEngageGate
+from .host_tui import HostTui
 
 
 class AlohaMiniHost:
@@ -181,6 +184,30 @@ def main():
         help="Do not connect follower arms, only operate the base and lift. Use together with --no_leader on the teleoperate side.",
     )
     parser.add_argument(
+        "--no_base",
+        action="store_true",
+        help="Do not connect the base wheels and lift axis, only operate the follower arms.",
+    )
+    parser.add_argument(
+        "--no_cameras",
+        action="store_true",
+        help="Do not connect any cameras.",
+    )
+    parser.add_argument(
+        "--engage_tolerance_deg",
+        type=float,
+        default=15.0,
+        help=(
+            "A follower arm stays limp until every leader joint is within this many degrees of it "
+            "(at startup, after a watchdog stop and after an overcurrent release)."
+        ),
+    )
+    parser.add_argument(
+        "--no_tui",
+        action="store_true",
+        help="Disable the live terminal dashboard (it is off automatically when not in a terminal).",
+    )
+    parser.add_argument(
         "--profile_timing",
         "--profile-timing",
         type=parse_bool,
@@ -211,6 +238,11 @@ def main():
     robot_config.no_follower = args.no_follower
     if args.no_follower:
         logging.info("no_follower mode: follower arms will not connect, only base and lift operate.")
+    robot_config.no_base = args.no_base
+    if args.no_base:
+        logging.info("no_base mode: base and lift will not connect, only follower arms operate.")
+    if args.no_cameras:
+        robot_config.cameras = {}
     robot = AlohaMini(robot_config)
 
     logging.info("Connecting AlohaMini")
@@ -263,8 +295,22 @@ def main():
     latest_action: dict[str, float] = {}
     last_sent_action: dict[str, float] = {}
     logging.info("Waiting for commands...")
+    engage_gate = ArmEngageGate(robot, tolerance_deg=args.engage_tolerance_deg)
+    seen_arm_fault_events = robot.get_safety_status().get("arm_fault_events", 0)
+
+    tui = None
+    if not args.no_tui and not args.profile_timing and sys.stdout.isatty():
+        modes = [args.robot_model]
+        if args.no_follower:
+            modes.append("base only")
+        if args.no_base:
+            modes.append("arms only")
+        modes.append(f"cameras: {', '.join(robot.cameras) or 'none'}")
+        tui = HostTui(robot, subtitle="  ·  ".join(modes))
 
     try:
+        if tui is not None:
+            tui.start()
         # Business logic
         start = time.perf_counter()
         duration = 0
@@ -300,6 +346,10 @@ def main():
             tracking_currents_ma = {
                 motor: float(raw) * 6.5 for motor, raw in robot._feedback_currents_raw.items()
             }
+            arm_fault_events = robot.get_safety_status().get("arm_fault_events", 0)
+            if arm_fault_events != seen_arm_fault_events:
+                seen_arm_fault_events = arm_fault_events
+                engage_gate.disengage("overcurrent")
             observation_done_t = time.perf_counter()
 
             try:
@@ -360,12 +410,13 @@ def main():
                     {**hold_action, "x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
                 )
                 robot.stop_motion()
+                engage_gate.disengage("watchdog")
                 has_received_command = False
                 command_owner.release()
 
             action_sent = False
             if command_received:
-                last_sent_action = robot.send_action(latest_action)
+                last_sent_action = robot.send_action(engage_gate.filter(latest_action, last_observation))
                 action_sent = True
             elif not watchdog_tripped:
                 safety_corrections = robot.supervise_arm_motion()
@@ -468,6 +519,21 @@ def main():
                     action_timing_totals_ms[name] = action_timing_totals_ms.get(name, 0.0) + value_ms
                 timing_command_count += 1
 
+            if tui is not None:
+                tui.update(
+                    loop_ms=loop_timings_ms["loop"],
+                    observation=last_observation,
+                    sent_action=last_sent_action,
+                    requested_action=latest_action,
+                    engage_status=engage_gate.status,
+                    currents_ma=tracking_currents_ma,
+                    last_cmd_age_s=(time.monotonic() - last_cmd_time) if has_received_command else None,
+                    watchdog_active=watchdog_active,
+                    watchdog_events=watchdog_events,
+                    target_source=target_source,
+                    owner=command_owner.owner,
+                )
+
             timing_elapsed_s = loop_done_t - timing_report_start_t
             if args.profile_timing and timing_elapsed_s >= 1.0:
                 averages = {name: total_ms / timing_loop_count for name, total_ms in timing_totals_ms.items()}
@@ -549,6 +615,8 @@ def main():
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Exiting...")
     finally:
+        if tui is not None:
+            tui.stop()
         print("Shutting down AlohaMini Host.")
         if camera_stream is not None:
             camera_stream.stop()

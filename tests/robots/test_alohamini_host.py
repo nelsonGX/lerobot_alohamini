@@ -279,6 +279,9 @@ class FakeBus:
     def sync_write(self, register, values, **kwargs):
         self.writes.append((register, dict(values)))
 
+    def disable_torque(self, motors, **kwargs):
+        self.writes.append(("Torque_Enable", dict.fromkeys(motors, 0)))
+
 
 def make_robot_feedback_stub(bus: FakeBus) -> AlohaMini:
     robot = object.__new__(AlohaMini)
@@ -587,8 +590,41 @@ def test_current_limits_reject_unknown_motor_model() -> None:
 
 
 @pytest.mark.parametrize(("current_raw", "duration"), [(-700.0, 0.650), (-1300.0, 0.080)])
-def test_overcurrent_stops_and_disconnects_after_elapsed_time(monkeypatch, current_raw, duration) -> None:
+def test_arm_overcurrent_releases_arm_torque_after_elapsed_time(monkeypatch, current_raw, duration) -> None:
     bus = FakeBus(current_raw=current_raw)
+    robot = make_robot_feedback_stub(bus)
+    robot._arm_goal_positions = {"arm_left_elbow_flex.pos": 50.0}
+    robot._joint_hold_goal = {"arm_left_elbow_flex": 1.0}
+    robot._gripper_hold_goal = {}
+    events = []
+    robot.stop_motion = lambda: events.append("stop")
+    robot.disconnect = lambda: events.append("disconnect")
+    clock = SimpleNamespace(now=1.0)
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: clock.now)
+
+    robot.read_and_check_currents(raw=True)
+    clock.now = 1.0 + duration - 0.001
+    robot.read_and_check_currents(raw=True)
+    assert events == []
+    clock.now = 1.0 + duration + 0.001
+    assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
+    assert events == ["stop"]
+    assert ("Torque_Enable", {"arm_left_elbow_flex": 0}) in bus.writes
+    assert robot._arm_goal_positions == {}
+    assert robot._joint_hold_goal == {}
+    status = robot.get_safety_status()
+    assert status["arm_fault_events"] == 1
+    assert "arm_left_elbow_flex" in status["last_arm_fault"]
+    # Timers restart after a release, so the next high reading does not re-trip at once.
+    clock.now += 0.001
+    robot.read_and_check_currents(raw=True)
+    assert robot.get_safety_status()["arm_fault_events"] == 1
+
+
+@pytest.mark.parametrize(("current_raw", "duration"), [(-700.0, 0.650), (-1300.0, 0.080)])
+def test_base_overcurrent_stops_and_disconnects_after_elapsed_time(monkeypatch, current_raw, duration) -> None:
+    bus = FakeBus(current_raw=current_raw)
+    bus.motors = {"base_left_wheel": bus.motors.pop("arm_left_elbow_flex")}
     robot = make_robot_feedback_stub(bus)
     events = []
     robot.stop_motion = lambda: events.append("stop")
@@ -596,8 +632,8 @@ def test_overcurrent_stops_and_disconnects_after_elapsed_time(monkeypatch, curre
     times = iter((1.0, 1.0 + duration - 0.001, 1.0 + duration + 0.001))
     monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: next(times))
 
-    assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
-    assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
+    assert robot.read_and_check_currents(raw=True)["base_left_wheel"] == current_raw
+    assert robot.read_and_check_currents(raw=True)["base_left_wheel"] == current_raw
     assert events == []
     with pytest.raises(SystemExit, match="1"):
         robot.read_and_check_currents(raw=True)

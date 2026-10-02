@@ -205,13 +205,17 @@ class AlohaMini(Robot):
             config.robot_model
         )
 
-        left_bus_motors = {
-            **(left_arm_motors_cfg if not config.no_follower else {}),
-            # base
+        if config.no_follower and config.no_base:
+            raise ValueError("no_follower and no_base cannot both be set: no motors would remain.")
+        base_lift_motors_cfg = {
             "base_left_wheel": Motor(8, bm, MotorNormMode.RANGE_M100_100),
             "base_back_wheel": Motor(9, bm, MotorNormMode.RANGE_M100_100),
             "base_right_wheel": Motor(10, bm, MotorNormMode.RANGE_M100_100),
             "lift_axis": Motor(11, lm, MotorNormMode.DEGREES),
+        }
+        left_bus_motors = {
+            **(left_arm_motors_cfg if not config.no_follower else {}),
+            **(base_lift_motors_cfg if not config.no_base else {}),
         }
         left_bus_calibration = {
             name: calibration for name, calibration in self.calibration.items() if name in left_bus_motors
@@ -253,7 +257,9 @@ class AlohaMini(Robot):
         self.cameras = make_cameras_from_configs(config.cameras)
 
         self.lift = LiftAxis(
-            LiftAxisConfig(lead_mm_per_rev=specs["lead_mm_per_rev"], motor_model=lm),
+            LiftAxisConfig(
+                enabled=not config.no_base, lead_mm_per_rev=specs["lead_mm_per_rev"], motor_model=lm
+            ),
             bus_left=self.left_bus,
             bus_right=self.right_bus,
         )
@@ -300,6 +306,8 @@ class AlohaMini(Robot):
         self._arm_sent_positions: dict[str, float] = {}
         self._arm_sent_at: float | None = None
         self._joint_hold_events = 0
+        self._arm_fault_events = 0
+        self._last_arm_fault: str | None = None
         self._safety_session_id = uuid4().hex
         self._last_currents_log_t = 0.0
 
@@ -362,7 +370,7 @@ class AlohaMini(Robot):
         self.configure()
         logger.info(f"{self} connected.")
 
-        if self.is_calibrated:
+        if self.is_calibrated and self.lift.enabled:
             self.lift.home()
             print("Lift axis homed to 0mm.")
         else:
@@ -723,13 +731,15 @@ class AlohaMini(Robot):
         )
         left_arm_done_t = time.perf_counter()
 
-        base_wheel_vel = self.left_bus.sync_read("Present_Velocity", self.base_motors)
-
-        base_vel = self._wheel_raw_to_body(
-            base_wheel_vel["base_left_wheel"],
-            base_wheel_vel["base_back_wheel"],
-            base_wheel_vel["base_right_wheel"],
-        )
+        if self.base_motors:
+            base_wheel_vel = self.left_bus.sync_read("Present_Velocity", self.base_motors)
+            base_vel = self._wheel_raw_to_body(
+                base_wheel_vel["base_left_wheel"],
+                base_wheel_vel["base_back_wheel"],
+                base_wheel_vel["base_right_wheel"],
+            )
+        else:
+            base_vel = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
         base_done_t = time.perf_counter()
 
         right_pos = (
@@ -924,7 +934,10 @@ class AlohaMini(Robot):
             self._arm_sent_positions.update(right_pos)
             self._arm_sent_at = time.monotonic()
         right_write_done_t = time.perf_counter()
-        self.left_bus.sync_write("Goal_Velocity", base_wheel_goal_vel)
+        # Skip wheels that are not on the bus (arms-only mode).
+        base_wheel_goal_vel = {k: v for k, v in base_wheel_goal_vel.items() if k in self.left_bus.motors}
+        if base_wheel_goal_vel:
+            self.left_bus.sync_write("Goal_Velocity", base_wheel_goal_vel)
         base_write_done_t = time.perf_counter()
 
         self.logs["action_timing_ms"] = {
@@ -980,6 +993,8 @@ class AlohaMini(Robot):
             "host_session_id": self._safety_session_id,
             "sampled_at_monotonic_s": time.monotonic(),
             "joint_hold_events": self._joint_hold_events,
+            "arm_fault_events": self._arm_fault_events,
+            "last_arm_fault": self._last_arm_fault,
             "joint_holds": dict(self._joint_hold_goal),
             "gripper_holds": dict(self._gripper_hold_goal),
             "requested_targets": dict(self._arm_goal_positions),
@@ -1161,6 +1176,8 @@ class AlohaMini(Robot):
             return None
 
     def stop_base(self):
+        if not self.base_motors:
+            return
         self.left_bus.sync_write("Goal_Velocity", dict.fromkeys(self.base_motors, 0), num_retry=0)
         logger.info("Base motors stopped")
 
@@ -1224,7 +1241,15 @@ class AlohaMini(Robot):
             if tripped is not None:
                 break
 
-        if tripped is not None:
+        if tripped is not None and tripped[0].startswith("arm_"):
+            # An arm fault is recoverable: release the arms (torque off) and keep the host
+            # alive. The host re-engages an arm only once its leader matches the follower pose.
+            name, current_ma, current_limit_ma, duration_s, cause = tripped
+            self._release_arms_after_fault(
+                f"{name}: {cause}, {current_ma:.0f} mA >= {current_limit_ma:.0f} mA "
+                f"for {duration_s * 1000:.0f} ms"
+            )
+        elif tripped is not None:
             name, current_ma, current_limit_ma, duration_s, cause = tripped
             logger.error(
                 "Overcurrent: %s, %s, %.1f mA >= %.1f mA for %.0f ms; disconnecting",
@@ -1245,6 +1270,34 @@ class AlohaMini(Robot):
         if raw:
             return combined_raw
         return {k: round(v * _CURRENT_MA_PER_RAW_UNIT, 1) for k, v in combined_raw.items()}
+
+    def _release_arms_after_fault(self, reason: str) -> None:
+        """Stop commanding the arms and disable their torque after an arm overcurrent."""
+        logger.error("Overcurrent: %s; arm torque released", reason)
+        with suppress(Exception):
+            self.stop_motion()
+        for bus in (self.left_bus, self.right_bus):
+            if bus is None:
+                continue
+            arm_motors = [motor for motor in bus.motors if motor.startswith("arm_")]
+            try:
+                bus.disable_torque(arm_motors, num_retry=2)
+            except Exception as e:
+                logger.error("Failed to release arm torque: %s", e)
+        for state in (
+            "_arm_goal_positions",
+            "_arm_sent_positions",
+            "_joint_hold_goal",
+            "_joint_hold_direction",
+            "_gripper_hold_goal",
+            "_gripper_hold_direction",
+            "_joint_stall_candidates",
+            "_sustained_overcurrent_started_at",
+            "_near_stall_overcurrent_started_at",
+        ):
+            getattr(self, state, {}).clear()
+        self._arm_fault_events += 1
+        self._last_arm_fault = reason
 
     @check_if_not_connected
     def disconnect(self):

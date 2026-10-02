@@ -25,6 +25,11 @@ def make_parser() -> argparse.ArgumentParser:
         help="Skip follower arm calibration.",
     )
     parser.add_argument(
+        "--no_base",
+        action="store_true",
+        help="Skip the base wheels and lift axis (arms only).",
+    )
+    parser.add_argument(
         "--id",
         type=str,
         default="AlohaMiniRobot",
@@ -41,6 +46,8 @@ def main():
     robot_config.id = args.id
     robot_config.robot_model = args.robot_model
     robot_config.no_follower = args.no_follower
+    robot_config.no_base = args.no_base
+    robot_config.cameras = {}
 
     robot = AlohaMini(robot_config)
 
@@ -48,7 +55,7 @@ def main():
         logging.info("Connecting AlohaMini without auto-calibration")
         robot.connect(calibrate=False)
         robot.calibrate()
-        if robot.is_calibrated:
+        if robot.is_calibrated and robot.lift.enabled:
             robot.lift.home()
             print("Lift axis homed to 0mm.")
         print("AlohaMini calibration complete.")
