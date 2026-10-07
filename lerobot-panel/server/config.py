@@ -44,7 +44,7 @@ LEADER_PORTS = {"left": "/dev/am_arm_leader_left", "right": "/dev/am_arm_leader_
 
 
 class Settings(BaseModel):
-    jetson_ip: str = Field(default_factory=lambda: os.environ.get("JETSON_IP", "10.95.27.248"))
+    jetson_ip: str = Field(default_factory=lambda: os.environ.get("JETSON_IP", "10.95.27.248"), pattern=r"^[A-Za-z0-9][A-Za-z0-9.:-]*$")
     robot_model: str = "alohamini1"
     teleop_id: str = "so101_leader_bi"
     arm_profile: str = "so-arm-5dof"
@@ -54,6 +54,11 @@ class Settings(BaseModel):
     default_reset_time_s: int = 10
     default_num_episodes: int = 10
     obs_port: int = 5556
+    # Jetson access for starting the robot host / follower calibration from the panel.
+    jetson_user: str = Field(default="", pattern=r"^([a-z_][a-z0-9_.-]*)?$")
+    jetson_repo: str = ""
+    host_args: str = Field(default="--no_base", pattern=r"^[A-Za-z0-9_.=\- ]*$")  # extra ./host flags
+    host_cameras: bool = False
 
 
 _settings_lock = threading.Lock()

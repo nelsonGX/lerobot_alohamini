@@ -1,9 +1,26 @@
 "use client";
 
-import type { Check } from "@/lib/api";
+import Link from "next/link";
+import { useState } from "react";
+import { api, type Check } from "@/lib/api";
 import { Button, Card, StatusIcon } from "./ui";
 
 export function Preflight({ checks, onRefresh, loading }: { checks: Check[] | null; onRefresh: () => void; loading: boolean }) {
+  const [fixing, setFixing] = useState<string | null>(null);
+  const [fixError, setFixError] = useState<string | null>(null);
+  const fix = async (c: Check) => {
+    setFixing(c.id);
+    setFixError(null);
+    try {
+      if (c.action === "start_host") await api.hostStart((await api.settings()).host_cameras);
+      else if (c.action === "stop_teleop") await api.procStop("teleop");
+    } catch (e) {
+      setFixError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFixing(null);
+      onRefresh();
+    }
+  };
   const failing = checks?.filter((c) => c.status === "fail").length ?? 0;
   return (
     <Card
@@ -34,6 +51,17 @@ export function Preflight({ checks, onRefresh, loading }: { checks: Check[] | nu
                 <div className="font-medium">{c.label}</div>
                 <div className="break-words text-xs text-ink-2">{c.detail}</div>
                 {c.hint && <div className="mt-0.5 break-words text-xs text-muted">→ {c.hint}</div>}
+                {(c.action === "start_host" || c.action === "stop_teleop") && (
+                  <Button size="sm" variant="primary" className="mt-1.5" disabled={fixing === c.id} onClick={() => fix(c)}>
+                    {fixing === c.id ? "Working…" : c.action === "start_host" ? "Start robot host" : "Stop teleoperation"}
+                  </Button>
+                )}
+                {(c.action === "setup_jetson" || c.action === "calibrate_leader") && (
+                  <Link href={c.action === "setup_jetson" ? "/robot" : "/robot#calibration"} className="mt-1 inline-block text-xs font-medium text-accent hover:underline">
+                    {c.action === "setup_jetson" ? "Open Robot page →" : "Calibrate now →"}
+                  </Link>
+                )}
+                {fixError && fixing === null && c.action === "start_host" && <div className="mt-1 text-xs text-critical-ink">{fixError}</div>}
               </div>
             </li>
           ))}

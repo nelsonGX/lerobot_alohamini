@@ -13,8 +13,9 @@ from config import LEADER_PORTS, calibration_home, lerobot_home, Settings
 # status: ok | warn | fail. "fail" blocks the Start button unless the user overrides.
 
 
-def _check(id: str, label: str, status: str, detail: str, hint: str = "") -> dict:
-    return {"id": id, "label": label, "status": status, "detail": detail, "hint": hint}
+def _check(id: str, label: str, status: str, detail: str, hint: str = "", action: str = "") -> dict:
+    # action: a fix the UI can offer as a button (start_host, calibrate_leader, stop_teleop, setup_jetson)
+    return {"id": id, "label": label, "status": status, "detail": detail, "hint": hint, "action": action}
 
 
 def _port_users(device: str, exclude_pids: set[int]) -> list[str]:
@@ -53,9 +54,13 @@ def _child_pids(root_pid: int) -> set[int]:
     return pids
 
 
-def run_checks(settings: Settings, recorder_pid: int | None = None) -> list[dict]:
+def run_checks(settings: Settings, recorder_pid: int | None = None, panel_users: list[str] | None = None,
+               panel_pids: set[int] | None = None) -> list[dict]:
+    """panel_users/panel_pids: programs the panel itself runs on the leader arms (teleop, calibration)."""
     checks = []
     exclude = _child_pids(recorder_pid) if recorder_pid else set()
+    for pid in panel_pids or ():
+        exclude |= _child_pids(pid)
     exclude.add(os.getpid())
 
     # Leader arms
@@ -66,7 +71,10 @@ def run_checks(settings: Settings, recorder_pid: int | None = None) -> list[dict
                                  "Plug in the leader arm USB cable and power it on."))  # fmt: skip
             continue
         users = _port_users(port, exclude)
-        if users:
+        if panel_users:
+            checks.append(_check(f"leader_{side}", label, "fail", f"{panel_users[0]} is using the leader arms",
+                                 "Stop it on the Robot page first.", "stop_teleop" if panel_users[0] == "Teleoperation" else ""))  # fmt: skip
+        elif users:
             checks.append(_check(f"leader_{side}", label, "fail", f"{port} is in use",
                                  "Close the other program first: " + "; ".join(users)))  # fmt: skip
         else:
@@ -78,7 +86,7 @@ def run_checks(settings: Settings, recorder_pid: int | None = None) -> list[dict
     if missing:
         checks.append(_check("calibration", "Leader calibration", "fail",
                              f"Missing for {', '.join(missing)} arm ({settings.teleop_id})",
-                             "Run ./lcalibrate in a terminal on this machine."))  # fmt: skip
+                             "Calibrate the leader arms on the Robot page.", "calibrate_leader"))  # fmt: skip
     else:
         checks.append(_check("calibration", "Leader calibration", "ok", f"{settings.teleop_id}"))
 
@@ -89,7 +97,7 @@ def run_checks(settings: Settings, recorder_pid: int | None = None) -> list[dict
             checks.append(_check("jetson", label, "ok", f"{settings.jetson_ip}:{settings.obs_port} is reachable"))
     except ConnectionRefusedError:
         checks.append(_check("jetson", label, "fail", f"{settings.jetson_ip} is up but the host is not running",
-                             "On the Jetson, run ./host in the repo."))  # fmt: skip
+                             "Start the robot host on the Jetson.", "start_host"))  # fmt: skip
     except OSError as e:
         reason = "timed out" if isinstance(e, TimeoutError | socket.timeout) else str(e)
         checks.append(_check("jetson", label, "fail", f"Cannot reach {settings.jetson_ip} ({reason})",

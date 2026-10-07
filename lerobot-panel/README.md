@@ -9,14 +9,23 @@ the leader arms are plugged into.
 ./panel --rebuild    # after changing the UI
 ```
 
-The robot host must still be running on the Jetson (`./host`). Set the Jetson IP under
-**Settings** (gear icon). Settings apply to everyone using the panel.
+Set the Jetson IP under **Settings** (gear icon). Settings apply to everyone using the panel.
+First time: open **Robot → Jetson**, enter the Jetson username and password once. The panel
+installs its own SSH key there (`.data/ssh/`) and from then on starts/stops the robot host itself.
 
 ## What it does
 
 - **Record**: pre-flight checks (leader arms, calibration, ports already in use, Jetson host,
   disk space), then a session runs `examples/alohamini/record_bi.py`. The buttons send the
   same keys as the terminal (N = next, R = re-record, Q = stop). Optional voice cues.
+- **Robot**: no terminal needed for the rest.
+  - Start/stop the robot host on the Jetson over SSH (what `./host` does), with or without cameras.
+    A host started from a terminal is detected and can be stopped too.
+  - Teleoperate without recording (`./client`).
+  - Calibrate the leader arms (`./lcalibrate`) or the follower arms on the Jetson (`./fcalibrate`). Prompts
+    such as "press ENTER" become buttons.
+  - Pre-flight problems on the Record page have fix buttons, e.g. **Start robot host**.
+  - Stopping the panel stops everything it started.
 - **Datasets**: browse local datasets in `~/.cache/huggingface/lerobot`. Watch any episode
   with synced cameras and state/action plots, mark bad episodes and delete them
   (uses `lerobot-edit-dataset`; a `<name>_old` backup is kept), or append more episodes.
@@ -25,7 +34,8 @@ The robot host must still be running on the Jetson (`./host`). Set the Jetson IP
 
 - `server/`: FastAPI backend. It runs the recorder in a pseudo-terminal and parses its output
   (`recorder.py`), and also handles dataset reading (`dataset_store.py`), checks
-  (`preflight.py`) and routes (`main.py`).
+  (`preflight.py`), the host/teleop/calibration programs (`procs.py`, shown via the tiny
+  terminal emulator in `term.py`) and routes (`main.py`).
 - `app/`, `components/`, `lib/`: Next.js UI, exported as static files to `out/` and served
   by the backend.
 - `.data/`: shared settings and session history (git-ignored).

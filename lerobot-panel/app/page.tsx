@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { HistoryCard } from "@/components/HistoryCard";
@@ -142,7 +143,10 @@ function HowTo() {
     <details className="rounded-xl border border-line bg-surface px-4 py-3 text-sm">
       <summary className="cursor-pointer font-semibold">How recording works</summary>
       <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-ink-2">
-        <li>Make sure <code>./host</code> is running on the Jetson and both leader arms are plugged in here.</li>
+        <li>
+          Make sure the robot host is running (<Link href="/robot" className="text-accent hover:underline">Robot</Link> page) and both
+          leader arms are plugged in here.
+        </li>
         <li>Fill in the dataset and task, then press <b>Start recording</b>.</li>
         <li>
           When it says <b>Recording</b>, do the task with the leader arms. Press <b>N</b> when done (or wait for the timer).

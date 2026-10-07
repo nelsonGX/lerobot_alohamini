@@ -43,12 +43,12 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
 
   return (
     <Modal open={open} onClose={onClose} title="Panel settings">
-      <p className="mb-4 text-sm text-ink-2">Shared by everyone using this panel. Changes apply to the next recording.</p>
+      <p className="mb-4 text-sm text-ink-2">Shared by everyone using this panel. Changes apply the next time something is started.</p>
       {error && <ErrorBox>{error}</ErrorBox>}
       {s && (
         <div className="grid gap-4">
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Jetson IP" hint="Where ./host runs">
+            <Field label="Jetson IP" hint="Where the robot host runs">
               <input className={inputClass} value={s.jetson_ip} onChange={(e) => set("jetson_ip", e.target.value.trim())} />
             </Field>
             <Field label="Robot model">
@@ -67,6 +67,22 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 <option>am-leader-6dof</option>
               </select>
             </Field>
+          </div>
+          <div className="border-t border-line pt-4">
+            <div className="mb-3 text-sm font-semibold">Jetson</div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Username" hint="Set by Robot → Jetson → Connect">
+                <input className={inputClass} value={s.jetson_user} onChange={(e) => set("jetson_user", e.target.value.trim())} />
+              </Field>
+              <Field label="Repo folder" hint="Where ./host lives on the Jetson">
+                <input className={inputClass} value={s.jetson_repo} onChange={(e) => set("jetson_repo", e.target.value.trim())} />
+              </Field>
+              <div className="col-span-2">
+                <Field label="Extra robot host flags" hint="--no_base skips the wheels and lift, like ./host">
+                  <input className={`${inputClass} font-mono`} value={s.host_args} onChange={(e) => set("host_args", e.target.value)} />
+                </Field>
+              </div>
+            </div>
           </div>
           <div className="border-t border-line pt-4">
             <div className="mb-3 text-sm font-semibold">Defaults for new recordings</div>

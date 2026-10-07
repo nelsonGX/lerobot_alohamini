@@ -8,6 +8,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -18,10 +19,23 @@ from pydantic import BaseModel, Field
 import dataset_store
 from config import EDIT_DATASET, REPO_ROOT, STATIC_DIR, Settings, load_settings, save_settings
 from preflight import run_checks
+from procs import SSH_KEY, Controls, ProcBusy, setup_ssh
 from recorder import Recorder, RecorderBusy, load_history
 
-app = FastAPI(title="LeRobot Panel")
 recorder = Recorder()
+controls = Controls()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    # Programs run from the panel are in their own sessions; don't leave them behind.
+    controls.shutdown()
+    if recorder.pid():
+        recorder.abort()
+
+
+app = FastAPI(title="LeRobot Panel", lifespan=lifespan)
 
 
 # ---------- settings & checks ----------
@@ -40,7 +54,18 @@ def put_settings(settings: Settings) -> Settings:
 
 @app.get("/api/preflight")
 def preflight() -> dict:
-    return {"checks": run_checks(load_settings(), recorder_pid=recorder.pid()), "checked_at": time.time()}
+    settings = load_settings()
+    checks = run_checks(settings, recorder_pid=recorder.pid(), panel_users=controls.leader_users(),
+                        panel_pids=controls.leader_pids())  # fmt: skip
+    host = controls.get("host")
+    for c in checks:
+        if c["id"] != "jetson" or c["status"] == "ok":
+            continue
+        if host and host.running:
+            c.update(status="warn", detail="The robot host is starting on the Jetson…", hint="", action="")
+        elif c["action"] == "start_host" and not (settings.jetson_user and SSH_KEY.exists()):
+            c.update(action="setup_jetson", hint="Connect the panel to the Jetson on the Robot page, then start the host there.")
+    return {"checks": checks, "checked_at": time.time()}
 
 
 # ---------- recording ----------
@@ -67,6 +92,8 @@ def start_recording(req: StartRequest) -> dict:
     if resume:
         # Appending must keep the dataset's original frame rate.
         fps = dataset_store.summarize(req.dataset, dataset_store.dataset_root(req.dataset), with_size=False)["fps"]
+    if users := controls.leader_users():
+        raise HTTPException(409, f"{users[0]} is using the leader arms. Stop it on the Robot page first.")
     try:
         session = recorder.start(
             settings=load_settings(),
@@ -108,6 +135,122 @@ def recorder_state(since: int = 0) -> dict:
 @app.get("/api/history")
 def history() -> list[dict]:
     return load_history()
+
+
+# ---------- robot: Jetson host, teleoperation, calibration ----------
+
+
+def _proc_error(e: Exception) -> HTTPException:
+    return HTTPException(409 if isinstance(e, ProcBusy) else 400, str(e))
+
+
+@app.get("/api/robot")
+def robot_state() -> dict:
+    return {"jetson": controls.jetson_status(load_settings()), "procs": controls.overview(),
+            "recording": recorder.recording_dataset()}  # fmt: skip
+
+
+class JetsonSetupRequest(BaseModel):
+    user: str = Field(min_length=1, max_length=64, pattern=r"^[a-z_][a-z0-9_.-]*$")
+    password: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/jetson/setup")
+def jetson_setup(req: JetsonSetupRequest) -> dict:
+    settings = load_settings()
+    try:
+        result = setup_ssh(settings, req.user, req.password)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        raise HTTPException(400, str(e)) from e
+    save_settings(settings.model_copy(update={"jetson_user": result["user"], "jetson_repo": result["repo"]}))
+    return result
+
+
+class HostStartRequest(BaseModel):
+    cameras: bool = False
+
+
+@app.post("/api/host/start")
+def host_start(req: HostStartRequest) -> dict:
+    settings = load_settings()
+    if settings.host_cameras != req.cameras:
+        save_settings(settings := settings.model_copy(update={"host_cameras": req.cameras}))
+    try:
+        controls.start_host(settings, req.cameras)
+    except (RuntimeError, OSError) as e:
+        raise _proc_error(e) from e
+    return {"ok": True}
+
+
+@app.post("/api/host/stop")
+def host_stop() -> dict:
+    if recorder.recording_dataset():
+        raise HTTPException(409, "A recording is running. Stop it before stopping the robot host.")
+    try:
+        return {"result": controls.stop_host(load_settings())}
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        raise _proc_error(e) from e
+
+
+@app.post("/api/teleop/start")
+def teleop_start() -> dict:
+    try:
+        controls.start_teleop(load_settings(), recorder_active=recorder.recording_dataset() is not None)
+    except (RuntimeError, OSError) as e:
+        raise _proc_error(e) from e
+    return {"ok": True}
+
+
+class CalibrateRequest(BaseModel):
+    target: str = Field(pattern="^(leader|follower)$")
+
+
+@app.post("/api/calibrate/start")
+def calibrate_start(req: CalibrateRequest) -> dict:
+    try:
+        controls.start_calibration(load_settings(), req.target, recorder_active=recorder.recording_dataset() is not None)
+    except (RuntimeError, OSError) as e:
+        raise _proc_error(e) from e
+    return {"ok": True}
+
+
+def _proc(name: str):
+    try:
+        return controls.get(name)
+    except KeyError as e:
+        raise HTTPException(404, f"Unknown program {name}") from e
+
+
+@app.get("/api/proc/{name}")
+def proc_state(name: str, version: int = -1) -> dict:
+    p = _proc(name)
+    return {"proc": None if p is None else p.snapshot(version)}
+
+
+class InputRequest(BaseModel):
+    text: str = Field(max_length=200)
+
+
+@app.post("/api/proc/{name}/input")
+def proc_input(name: str, req: InputRequest) -> dict:
+    p = _proc(name)
+    if p is None:
+        raise HTTPException(409, "Not running")
+    try:
+        p.write(req.text)
+    except (RuntimeError, OSError) as e:
+        raise HTTPException(409, str(e)) from e
+    return {"ok": True}
+
+
+@app.post("/api/proc/{name}/stop")
+def proc_stop(name: str) -> dict:
+    if name == "host":
+        return host_stop()
+    p = _proc(name)
+    if p is not None:
+        p.stop()
+    return {"ok": True}
 
 
 # ---------- datasets ----------

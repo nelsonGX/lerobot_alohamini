@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
 import { SettingsDialog } from "./SettingsDialog";
@@ -12,11 +12,13 @@ export function Nav() {
   const path = usePathname();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { data, error } = usePoll(() => api.recorder(1e12), 2000);
+  const robot = usePoll(api.robot, 3000);
+  const hostUp = robot.data?.jetson.host_listening;
   const s = data?.session;
   const active = s?.active;
   const meta = s ? PHASE_META[s.phase] : null;
 
-  const tab = (href: string, label: string) => {
+  const tab = (href: string, label: ReactNode) => {
     const on = href === "/" ? path === "/" : path.startsWith(href);
     return (
       <Link
@@ -40,6 +42,15 @@ export function Nav() {
         </Link>
         <nav className="flex gap-1">
           {tab("/", "Record")}
+          {tab(
+            "/robot",
+            <span className="flex items-center gap-1.5" title={hostUp ? "Robot host is running" : "Robot host is not running"}>
+              Robot
+              {robot.data && (
+                <span className={`size-2 rounded-full ${hostUp ? "bg-good" : "border border-muted"}`} aria-label={hostUp ? "host running" : "host stopped"} />
+              )}
+            </span>,
+          )}
           {tab("/datasets", "Datasets")}
         </nav>
         <div className="ml-auto flex items-center gap-2">
