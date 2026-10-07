@@ -1,139 +1,136 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { Suspense, useCallback, useState } from "react";
 import { CameraPreview } from "@/components/CameraPreview";
-import { HostMonitor } from "@/components/HostMonitor";
-import { HistoryCard } from "@/components/HistoryCard";
-import { LiveSession } from "@/components/LiveSession";
-import { Preflight } from "@/components/Preflight";
-import { RecordForm } from "@/components/RecordForm";
-import { UploadCard } from "@/components/UploadCard";
-import { ErrorBox } from "@/components/ui";
-import { api, type Session } from "@/lib/api";
-import { usePoll } from "@/lib/hooks";
-import { useRecorderLog, useTopic } from "@/lib/live";
+import { HealthStrip } from "@/components/HealthStrip";
+import { LayoutDiagram } from "@/components/LayoutDiagram";
+import { PHASE_META } from "@/components/phase";
+import { TaskProgress } from "@/components/TaskProgress";
+import { fmtDuration } from "@/lib/format";
+import { useTopic } from "@/lib/live";
 
-export default function RecordPage() {
-  return (
-    <Suspense>
-      <Record />
-    </Suspense>
-  );
-}
+const pad = (n: number) => String(n).padStart(2, "0");
 
-function Record() {
-  const router = useRouter();
+/** Read-only view of what the panel is doing, for anyone to watch. No controls; it only subscribes to view topics. */
+export default function WatchPage() {
   const recorder = useTopic("recorder");
-  const { data: state, error: backendError } = recorder;
-  const log = useRecorderLog();
-  const [dismissed, setDismissed] = useState<string | null>(null);
-
-  const preflight = useTopic("preflight");
   const collection = useTopic("collection").data;
-  const settings = usePoll(api.settings, 30000);
-  const history = usePoll(api.history, 10000, [state?.session?.phase]);
-  const [checking, setChecking] = useState(false);
-  const recheck = useCallback(async () => {
-    setChecking(true);
-    await preflight.refresh();
-    setTimeout(() => setChecking(false), 600);
-  }, [preflight]);
+  const session = recorder.data?.session ?? null;
+  const st = session?.state ?? null;
+  const active = !!session?.active;
+  const phase = session?.phase;
+  const meta = phase ? PHASE_META[phase] : null;
+  const config = collection?.config ?? null;
+  const slots = config?.slots ?? Object.keys(st?.layout?.names ?? {});
+  const remaining = st?.remaining_s ?? st?.episode_time_s ?? 0;
 
-  const session: Session | null = state?.session ?? null;
-  // A finished session's result stays up until dismissed (or for 30 min, for whoever opens the panel next).
-  const showSession =
-    session && (session.active || (dismissed !== session.id && session.now - (session.ended_at ?? 0) < 1800));
-  const blocked = !!preflight.data?.checks.some((c) => c.status === "fail");
-
-  const newSession = () => {
-    if (session) setDismissed(session.id);
-    router.replace("/");
-  };
-
-  const live = !!showSession;
-
-  const checks = (
-    <div className="grid gap-x-8 md:grid-cols-2">
-      <details className="border-b border-line text-sm">
-        <summary className="py-2.5 font-medium">
-          Pre-flight checks{" "}
-          <span className={blocked ? "text-critical-ink" : "text-good-ink"}>{blocked ? "— problems" : "— all good"}</span>
-        </summary>
-        <div className="pb-3">
-          <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
-        </div>
-      </details>
-      <details className="border-b border-line text-sm">
-        <summary className="py-2.5 font-medium">Recent sessions</summary>
-        <div className="pb-3">
-          <HistoryCard history={history.data} />
-        </div>
-      </details>
-    </div>
-  );
-
-  // Cameras are always the rightmost column, beside everything else.
   return (
-    <div
-      className={`grid gap-6 ${live ? "xl:grid-cols-[minmax(0,1fr)_minmax(260px,22vw)]" : "lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_320px_minmax(260px,22vw)]"}`}
-    >
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(280px,34vw)]">
       <div className="grid min-w-0 content-start gap-6">
-        <div>
-          {backendError && (
-            <div className="mb-4">
-              <ErrorBox>Cannot reach the panel backend: {backendError}</ErrorBox>
+        <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line pb-3">
+          <span className="font-mono text-sm font-semibold tracking-tight">
+            alohamini<span className="text-muted">/panel</span>
+          </span>
+          <span className="rounded-full border border-line px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-muted">Live view</span>
+          <span className="ml-auto text-xs text-muted">
+            {recorder.error ? <span className="text-critical-ink">{recorder.error}</span> : "Updates live"}
+          </span>
+        </header>
+
+        {!recorder.data ? (
+          <p className="text-sm text-muted">Loading…</p>
+        ) : !session || !meta ? (
+          <Idle text="No recording session yet." />
+        ) : (
+          <section className="grid gap-5">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="flex items-center gap-2 font-mono text-sm font-semibold uppercase tracking-wider">
+                <span className={`size-2.5 rounded-full ${phase === "recording" ? "pulse-dot" : ""}`} style={{ background: meta.color }} aria-hidden />
+                {active ? meta.label : phase === "done" ? "Session finished" : meta.label}
+              </span>
+              {active && st?.episode_number != null && <span className="tabular font-mono text-sm text-muted">EPISODE {st.episode_number}</span>}
+              {st?.simulated && <span className="rounded bg-warn/20 px-1.5 py-0.5 text-[11px] font-semibold text-warn-ink">SIMULATION</span>}
+              <span className="ml-auto text-sm text-ink-2">{active ? st?.message || meta.description : meta.description}</span>
             </div>
-          )}
-          {!state ? (
-            <p className="text-sm text-muted">Loading…</p>
-          ) : showSession ? (
-            <LiveSession session={session} log={log} config={collection?.config ?? null} onNewSession={newSession} />
-          ) : (
-            <RecordForm settings={settings.data} collection={collection} blocked={blocked} onStarted={() => void recorder.refresh()} />
-          )}
-        </div>
-        {live && session?.active && <HostMonitor />}
-        {!session?.active && <UploadCard collection={collection} recording={false} />}
-        {/* Mid-session the operator needs the controls, not setup: checks and history fold away. */}
-        {live && checks}
+
+            {active && <HealthStrip health={st?.health ?? null} />}
+
+            {active && st && phase === "recording" && (
+              <div>
+                <div className="tabular font-mono text-[clamp(4rem,12vw,9rem)] font-medium leading-[0.85] tracking-tighter">
+                  {pad(remaining)}
+                  <span className="ml-2 text-[0.22em] tracking-normal text-muted">sec</span>
+                </div>
+                <div className="mt-4 h-2 overflow-hidden rounded-[2px] bg-surface-2">
+                  <div
+                    className="h-full transition-[width] duration-500 ease-linear"
+                    style={{ width: `${(1 - remaining / Math.max(st.episode_time_s, 1)) * 100}%`, background: "var(--critical)" }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {active && st && phase === "review" && st.review?.stats && (
+              <p className="text-sm text-ink-2">
+                Operator is reviewing the last take ({fmtDuration(st.review.stats.duration_s)}, {st.review.stats.frames} frames).
+              </p>
+            )}
+
+            {active && st?.task_text && (phase === "ready" || phase === "recording" || phase === "review") && (
+              <div className="grid gap-4 md:grid-cols-[1fr_minmax(0,18rem)]">
+                <div>
+                  <div className="eyebrow mb-2">Task</div>
+                  <div className="font-mono text-base">{st.task_text}</div>
+                </div>
+                {st.layout && config && (
+                  <div>
+                    <div className="eyebrow mb-2">Layout</div>
+                    <LayoutDiagram layout={st.layout} objects={config.objects} slots={slots} size="sm" />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!active && session.phase === "done" && (
+              <p className="text-sm text-ink-2">
+                Saved {session.saved_count} episode{session.saved_count === 1 ? "" : "s"}, {session.discarded_count} discarded.
+              </p>
+            )}
+            {!active && session.phase === "failed" && <p className="text-sm text-critical-ink">The recorder stopped with an error.</p>}
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line pt-3 font-mono text-xs text-ink-2">
+              {session.operator && <span>{session.operator}</span>}
+              <span>{session.dataset}</span>
+              <span>{st?.saved ?? session.saved_count} saved</span>
+              <span>{st?.discarded ?? session.discarded_count} discarded</span>
+            </div>
+          </section>
+        )}
+
+        {collection && !collection.error && collection.config && (
+          <section>
+            <div className="eyebrow mb-2">
+              Progress · {collection.total_episodes} episode{collection.total_episodes === 1 ? "" : "s"} in {collection.config.dataset}
+            </div>
+            <TaskProgress
+              tasks={collection.config.tasks.map((t) => ({ ...t, count: collection.counts[t.id] ?? 0 }))}
+              suggestedId={active ? null : collection.suggested_task_id}
+              flagged={collection.flagged}
+            />
+          </section>
+        )}
       </div>
-      {!live && (
-        <aside className="grid content-start gap-4">
-          <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
-          <HistoryCard history={history.data} />
-          <HowTo />
-        </aside>
-      )}
-      <div className="min-w-0 xl:sticky xl:top-14 xl:self-start">
+
+      <div className="min-w-0 xl:sticky xl:top-6 xl:self-start">
         <CameraPreview />
       </div>
     </div>
   );
 }
 
-function HowTo() {
+function Idle({ text }: { text: string }) {
   return (
-    <details className="rounded-lg border border-line px-4 py-3 text-sm">
-      <summary className="cursor-pointer font-semibold">How recording works</summary>
-      <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-ink-2">
-        <li>
-          Make sure the robot host is running (<Link href="/robot" className="text-accent hover:underline">Robot</Link> page) and both
-          leader arms are plugged in here.
-        </li>
-        <li>Enter your name and press <b>Start session</b>.</li>
-        <li>
-          For each episode the screen shows a <b>layout</b> and the <b>task</b> that is furthest behind. Place the objects like the picture,
-          then press <b>Start recording</b>.
-        </li>
-        <li>Do the task with the leader arms. Press <b>Done</b> when finished (or wait for the timer).</li>
-        <li>
-          <b>Review</b>: nothing is saved yet. <b>Save</b> keeps it, <b>Re-record</b> throws it away and repeats the same layout,
-          <b> Discard</b> throws it away and moves on. Episodes flagged as bad say why.
-        </li>
-        <li>When you are done, press <b>Finish session</b>, then <b>Upload dataset</b>.</li>
-      </ol>
-    </details>
+    <div className="flex items-center gap-2 py-6 font-mono text-sm text-ink-2">
+      <span className="size-2.5 rounded-full border border-muted" /> {text}
+    </div>
   );
 }

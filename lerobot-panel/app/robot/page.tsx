@@ -226,7 +226,7 @@ export default function RobotPage() {
 
           <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface px-4 py-3 text-sm text-ink-2">
             Robot ready? Head over and start a session.
-            <LinkButton href="/" variant="primary" size="sm">Go to Record →</LinkButton>
+            <LinkButton href="/record" variant="primary" size="sm">Go to Record →</LinkButton>
           </div>
         </div>
       </div>

@@ -37,7 +37,8 @@ export function Nav() {
           <span className="font-mono text-sm font-semibold tracking-tight">alohamini<span className="text-muted">/panel</span></span>
         </Link>
         <nav className="flex">
-          {tab("/", "Record")}
+          {tab("/", "Watch")}
+          {tab("/record", "Record")}
           {tab(
             "/robot",
             <span className="flex items-center gap-1.5" title={hostUp ? "Robot host is running" : "Robot host is not running"}>
@@ -56,7 +57,7 @@ export function Nav() {
             </span>
           ) : active && meta ? (
             <Link
-              href="/"
+              href="/record"
               className="flex items-center gap-2 rounded-md border border-line px-2.5 py-1 font-mono text-xs"
               title={`${s.operator || "Someone"} is recording ${s.dataset}`}
             >

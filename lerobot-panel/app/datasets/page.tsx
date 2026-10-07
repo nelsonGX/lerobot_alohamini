@@ -60,7 +60,7 @@ export default function DatasetsPage() {
         <div className="rounded-lg border border-dashed border-line p-10 text-center text-sm text-muted">
           {data.datasets.length === 0 ? (
             <>
-              No datasets yet. <Link href="/" className="text-accent underline">Record your first session</Link>.
+              No datasets yet. <Link href="/record" className="text-accent underline">Record your first session</Link>.
             </>
           ) : (
             <>
