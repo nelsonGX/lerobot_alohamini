@@ -394,7 +394,7 @@ def main():
         wait_for_fresh_observation(episode_number)
         if events["stop_recording"]:
             break
-        log_say(f"Recording episode {episode_number}")
+        log_say(f"Recording episode {episode_number}", play_sounds=False)
         print(
             f"Episode {episode_number} recording started. "
             f"{remaining_episodes} episode(s) remaining. Press -> to end recording; "
@@ -405,7 +405,7 @@ def main():
         # === Main record loop ===
         record_episode(episode_number)
 
-        log_say(f"Recording episode {episode_number} ended")
+        log_say(f"Recording episode {episode_number} ended", play_sounds=False)
         print(f"Episode {episode_number} recording ended. Resetting before save.", flush=True)
 
         # Finish resetting first. No dataset frames are written during this phase.
