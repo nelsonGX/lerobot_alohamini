@@ -13,5 +13,5 @@ if [[ "${1:-}" == "--rebuild" || ! -f lerobot-panel/out/index.html ]]; then
 fi
 
 echo "Panel: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT  (Ctrl+C to stop)"
-exec uv run --with 'fastapi>=0.115' --with 'uvicorn[standard]>=0.30' \
+exec uv run --with 'fastapi>=0.115' --with 'uvicorn[standard]>=0.30' --with 'pyzmq>=26.2.1' \
   uvicorn --app-dir lerobot-panel/server main:app --host 0.0.0.0 --port "$PORT"

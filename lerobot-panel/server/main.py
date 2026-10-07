@@ -5,6 +5,7 @@ Run from the repo root with ./panel (see lerobot-panel/README.md).
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import threading
 import time
@@ -12,11 +13,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import dataset_store
+from camera_feed import CameraFeed
 from config import EDIT_DATASET, REPO_ROOT, STATIC_DIR, Settings, load_settings, save_settings
 from preflight import run_checks
 from procs import AgentError, Controls, ProcBusy, agent_call, read_token, save_token
@@ -24,6 +26,7 @@ from recorder import Recorder, RecorderBusy, load_history
 
 recorder = Recorder()
 controls = Controls()
+camera_feed = CameraFeed()
 
 
 @asynccontextmanager
@@ -154,6 +157,35 @@ def robot_state() -> dict:
 def host_telemetry() -> dict:
     """What the host's terminal dashboard shows (arm positions, currents, link state), streamed from the Jetson agent."""
     return controls.host_telemetry(load_settings())
+
+
+CAMERA_STREAM_PORT = 5557  # the host's --camera_stream port
+
+
+@app.get("/api/cameras")
+def cameras() -> dict:
+    """Cameras currently streaming from the host (polling this keeps the preview connection open)."""
+    settings = load_settings()
+    camera_feed.touch(settings.jetson_ip, CAMERA_STREAM_PORT)
+    return camera_feed.status()
+
+
+@app.get("/api/camera/{name}")
+async def camera_mjpeg(name: str) -> StreamingResponse:
+    settings = load_settings()
+
+    async def gen():
+        last = -1
+        while True:
+            camera_feed.touch(settings.jetson_ip, CAMERA_STREAM_PORT)
+            item = camera_feed.frame(name)
+            if item is None or item[1] == last:
+                await asyncio.sleep(0.03)
+                continue
+            jpeg, last = item
+            yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store"})
 
 
 class JetsonSetupRequest(BaseModel):

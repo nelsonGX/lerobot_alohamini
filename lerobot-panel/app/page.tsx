@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { CameraPreview } from "@/components/CameraPreview";
+import { HostMonitor } from "@/components/HostMonitor";
 import { HistoryCard } from "@/components/HistoryCard";
 import { LiveSession } from "@/components/LiveSession";
 import { Preflight } from "@/components/Preflight";
@@ -100,7 +102,7 @@ function Record() {
   const live = !!showSession;
 
   return (
-    <div className={`grid gap-6 ${live ? "" : "lg:grid-cols-[minmax(0,1fr)_320px]"}`}>
+    <div className={`grid gap-6 ${live ? "lg:grid-cols-[minmax(0,1fr)_380px]" : "lg:grid-cols-[minmax(0,1fr)_320px]"}`}>
       <div className="min-w-0">
         {backendError && (
           <div className="mb-4">
@@ -133,29 +135,38 @@ function Record() {
       </div>
       {live ? (
         // Mid-session the operator needs the controls, not setup: checks and history fold away.
-        <div className="grid gap-x-8 md:grid-cols-2">
-          <details className="border-b border-line text-sm">
-            <summary className="py-2.5 font-medium">
-              Pre-flight checks{" "}
-              <span className={blocked ? "text-critical-ink" : "text-good-ink"}>{blocked ? "— problems" : "— all good"}</span>
-            </summary>
-            <div className="pb-3">
-              <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
-            </div>
-          </details>
-          <details className="border-b border-line text-sm">
-            <summary className="py-2.5 font-medium">Recent sessions</summary>
-            <div className="pb-3">
-              <HistoryCard history={history.data} />
-            </div>
-          </details>
+        <div className="grid content-start gap-6">
+          <CameraPreview />
+          <div className="grid gap-x-8 md:grid-cols-2">
+            <details className="border-b border-line text-sm">
+              <summary className="py-2.5 font-medium">
+                Pre-flight checks{" "}
+                <span className={blocked ? "text-critical-ink" : "text-good-ink"}>{blocked ? "— problems" : "— all good"}</span>
+              </summary>
+              <div className="pb-3">
+                <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
+              </div>
+            </details>
+            <details className="border-b border-line text-sm">
+              <summary className="py-2.5 font-medium">Recent sessions</summary>
+              <div className="pb-3">
+                <HistoryCard history={history.data} />
+              </div>
+            </details>
+          </div>
         </div>
       ) : (
         <aside className="grid content-start gap-4">
+          <CameraPreview />
           <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
           <HistoryCard history={history.data} />
           <HowTo />
         </aside>
+      )}
+      {live && session?.active && (
+        <div className="min-w-0 lg:col-span-2">
+          <HostMonitor />
+        </div>
       )}
     </div>
   );

@@ -183,7 +183,7 @@ def start(req: StartRequest) -> dict:
         raise HTTPException(409, "The robot host or a calibration is already running on the Jetson.")
     model = shlex.quote(req.robot_model)
     if req.name == "host":
-        args = f"--robot_model {model} {req.host_args} --status_file {HOST_STATUS_FILE}" + ("" if req.cameras else " --no_cameras")
+        args = f"--robot_model {model} {req.host_args} --status_file {HOST_STATUS_FILE}" + (" --camera-stream" if req.cameras else " --no_cameras")
         # Piping through cat makes stdout a pipe, so the host prints plain logs instead of its full-screen dashboard.
         script = f"uv run python -m {HOST_MODULE} {args} 2>&1 | cat"
     else:
