@@ -32,7 +32,7 @@ export function Nav() {
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-page/90 backdrop-blur">
-      <div className="mx-auto flex h-12 max-w-7xl items-center gap-2 px-4">
+      <div className="flex h-12 items-center gap-2 px-4">
         <Link href="/" className="mr-3 flex items-center gap-2 font-semibold">
           <span className="font-mono text-sm font-semibold tracking-tight">alohamini<span className="text-muted">/panel</span></span>
         </Link>

@@ -101,73 +101,76 @@ function Record() {
 
   const live = !!showSession;
 
-  return (
-    <div className={`grid gap-6 ${live ? "lg:grid-cols-[minmax(0,1fr)_380px]" : "lg:grid-cols-[minmax(0,1fr)_320px]"}`}>
-      <div className="min-w-0">
-        {backendError && (
-          <div className="mb-4">
-            <ErrorBox>Cannot reach the panel backend: {backendError}</ErrorBox>
-          </div>
-        )}
-        {!state ? (
-          <p className="text-sm text-muted">Loading…</p>
-        ) : showSession ? (
-          <LiveSession
-            session={session}
-            log={log}
-            onNewSession={() => newSession(false)}
-            onRecordMore={() => newSession(true)}
-          />
-        ) : (
-          <RecordForm
-            key={prefill.key}
-            settings={settings.data}
-            datasets={datasets.data?.datasets ?? []}
-            blocked={blocked}
-            initialDataset={prefill.dataset}
-            initialTask={prefill.task}
-            onStarted={() => {
-              lastLogId.current = 0;
-              sessionId.current = null;
-            }}
-          />
-        )}
-      </div>
-      {live ? (
-        // Mid-session the operator needs the controls, not setup: checks and history fold away.
-        <div className="grid content-start gap-6">
-          <CameraPreview />
-          <div className="grid gap-x-8 md:grid-cols-2">
-            <details className="border-b border-line text-sm">
-              <summary className="py-2.5 font-medium">
-                Pre-flight checks{" "}
-                <span className={blocked ? "text-critical-ink" : "text-good-ink"}>{blocked ? "— problems" : "— all good"}</span>
-              </summary>
-              <div className="pb-3">
-                <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
-              </div>
-            </details>
-            <details className="border-b border-line text-sm">
-              <summary className="py-2.5 font-medium">Recent sessions</summary>
-              <div className="pb-3">
-                <HistoryCard history={history.data} />
-              </div>
-            </details>
-          </div>
+  const checks = (
+    <div className="grid gap-x-8 md:grid-cols-2">
+      <details className="border-b border-line text-sm">
+        <summary className="py-2.5 font-medium">
+          Pre-flight checks{" "}
+          <span className={blocked ? "text-critical-ink" : "text-good-ink"}>{blocked ? "— problems" : "— all good"}</span>
+        </summary>
+        <div className="pb-3">
+          <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
         </div>
-      ) : (
+      </details>
+      <details className="border-b border-line text-sm">
+        <summary className="py-2.5 font-medium">Recent sessions</summary>
+        <div className="pb-3">
+          <HistoryCard history={history.data} />
+        </div>
+      </details>
+    </div>
+  );
+
+  // Cameras are always the rightmost column, beside everything else.
+  return (
+    <div
+      className={`grid gap-6 ${live ? "xl:grid-cols-[minmax(0,1fr)_minmax(320px,26vw)]" : "lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_320px_minmax(320px,26vw)]"}`}
+    >
+      <div className="grid min-w-0 content-start gap-6">
+        <div>
+          {backendError && (
+            <div className="mb-4">
+              <ErrorBox>Cannot reach the panel backend: {backendError}</ErrorBox>
+            </div>
+          )}
+          {!state ? (
+            <p className="text-sm text-muted">Loading…</p>
+          ) : showSession ? (
+            <LiveSession
+              session={session}
+              log={log}
+              onNewSession={() => newSession(false)}
+              onRecordMore={() => newSession(true)}
+            />
+          ) : (
+            <RecordForm
+              key={prefill.key}
+              settings={settings.data}
+              datasets={datasets.data?.datasets ?? []}
+              blocked={blocked}
+              initialDataset={prefill.dataset}
+              initialTask={prefill.task}
+              onStarted={() => {
+                lastLogId.current = 0;
+                sessionId.current = null;
+              }}
+            />
+          )}
+        </div>
+        {live && session?.active && <HostMonitor />}
+        {/* Mid-session the operator needs the controls, not setup: checks and history fold away. */}
+        {live && checks}
+      </div>
+      {!live && (
         <aside className="grid content-start gap-4">
-          <CameraPreview />
           <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
           <HistoryCard history={history.data} />
           <HowTo />
         </aside>
       )}
-      {live && session?.active && (
-        <div className="min-w-0 lg:col-span-2">
-          <HostMonitor />
-        </div>
-      )}
+      <div className="min-w-0 xl:sticky xl:top-16 xl:self-start">
+        <CameraPreview />
+      </div>
     </div>
   );
 }
