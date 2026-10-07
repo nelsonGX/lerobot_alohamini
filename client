@@ -1,1 +1,1 @@
-uv run python examples/alohamini/teleoperate_bi.py --robot.remote_ip 127.0.0.1 --robot.robot_model alohamini1 --teleop.id so101_leader_bi --teleop.arm_profile so-arm-5dof
+uv run python examples/alohamini/teleoperate_bi.py --robot.remote_ip 10.95.27.248 --robot.robot_model alohamini1 --teleop.id so101_leader_bi --teleop.arm_profile so-arm-5dof
