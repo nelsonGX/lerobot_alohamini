@@ -3,8 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
-import { api } from "@/lib/api";
-import { usePoll } from "@/lib/hooks";
+import { useTopic } from "@/lib/live";
 import { QuickActions } from "./QuickActions";
 import { SettingsDialog } from "./SettingsDialog";
 import { PHASE_META } from "./phase";
@@ -12,8 +11,8 @@ import { PHASE_META } from "./phase";
 export function Nav() {
   const path = usePathname();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const { data, error } = usePoll(() => api.recorder(1e12), 2000);
-  const robot = usePoll(api.robot, 3000);
+  const { data, error } = useTopic("recorder");
+  const robot = useTopic("robot");
   const hostUp = robot.data?.jetson.host_listening;
   const s = data?.session;
   const active = s?.active;

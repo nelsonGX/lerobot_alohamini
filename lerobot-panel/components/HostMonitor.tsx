@@ -1,8 +1,8 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { api, type HostArm, type HostJoint, type HostSnapshot } from "@/lib/api";
-import { usePoll } from "@/lib/hooks";
+import { type HostArm, type HostJoint, type HostSnapshot } from "@/lib/api";
+import { useTopic } from "@/lib/live";
 import { Card } from "./ui";
 
 const CLIENT: Record<HostSnapshot["client"]["state"], { label: string; color: string }> = {
@@ -18,7 +18,7 @@ const upTime = (s: number) => `${String(Math.floor(s / 3600)).padStart(2, "0")}:
 
 /** The host's terminal dashboard, mirrored: link state, loop rate, per-joint position/command/current, events. */
 export function HostMonitor() {
-  const { data } = usePoll(api.hostTelemetry, 250);
+  const { data } = useTopic("host");
   const s = data?.snapshot ?? null;
   const stale = data?.age_s != null && data.age_s > 2;
 

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useState } from "react";
 import { CameraPreview } from "@/components/CameraPreview";
 import { HostMonitor } from "@/components/HostMonitor";
 import { HistoryCard } from "@/components/HistoryCard";
@@ -10,8 +10,9 @@ import { LiveSession } from "@/components/LiveSession";
 import { Preflight } from "@/components/Preflight";
 import { RecordForm } from "@/components/RecordForm";
 import { ErrorBox } from "@/components/ui";
-import { api, type RecorderState, type Session } from "@/lib/api";
+import { api, type Session } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
+import { useRecorderLog, useTopic } from "@/lib/live";
 
 export default function RecordPage() {
   return (
@@ -24,54 +25,17 @@ export default function RecordPage() {
 function Record() {
   const params = useSearchParams();
   const router = useRouter();
-  const [state, setState] = useState<RecorderState | null>(null);
-  const [backendError, setBackendError] = useState<string | null>(null);
-  const [log, setLog] = useState<{ id: number; text: string }[]>([]);
+  const recorder = useTopic("recorder");
+  const { data: state, error: backendError } = recorder;
+  const log = useRecorderLog();
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [prefill, setPrefill] = useState<{ dataset?: string; task?: string; key: number }>(() => ({
     dataset: params.get("dataset") ?? undefined,
     task: params.get("task") ?? undefined,
     key: 0,
   }));
-  const lastLogId = useRef(0);
-  const sessionId = useRef<string | null>(null);
 
-  // Recorder state: fast while a session runs, slower when idle.
-  const active = !!state?.session?.active;
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout>;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const st = await api.recorder(lastLogId.current);
-        if (st.session?.id !== sessionId.current) {
-          sessionId.current = st.session?.id ?? null;
-          lastLogId.current = 0;
-          const full = await api.recorder(0);
-          setLog(full.log);
-          lastLogId.current = full.log.at(-1)?.id ?? 0;
-          setState(full);
-        } else {
-          if (st.log.length) {
-            setLog((prev) => [...prev, ...st.log].slice(-2000));
-            lastLogId.current = st.log.at(-1)!.id;
-          }
-          setState(st);
-        }
-        setBackendError(null);
-      } catch (e) {
-        setBackendError(e instanceof Error ? e.message : String(e));
-      }
-      if (!cancelled) timer = setTimeout(tick, active ? 400 : 1500);
-    };
-    tick();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [active]);
-
-  const preflight = usePoll(api.preflight, active ? 15000 : 5000);
+  const preflight = useTopic("preflight");
   const settings = usePoll(api.settings, 30000);
   const datasets = usePoll(api.datasets, 10000);
   const history = usePoll(api.history, 10000, [state?.session?.phase]);
@@ -79,7 +43,7 @@ function Record() {
   const recheck = useCallback(async () => {
     setChecking(true);
     await preflight.refresh();
-    setChecking(false);
+    setTimeout(() => setChecking(false), 600);
   }, [preflight]);
 
   const session: Session | null = state?.session ?? null;
@@ -124,7 +88,7 @@ function Record() {
   // Cameras are always the rightmost column, beside everything else.
   return (
     <div
-      className={`grid gap-6 ${live ? "xl:grid-cols-[minmax(0,1fr)_minmax(320px,26vw)]" : "lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_320px_minmax(320px,26vw)]"}`}
+      className={`grid gap-6 ${live ? "xl:grid-cols-[minmax(0,1fr)_minmax(260px,22vw)]" : "lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_320px_minmax(260px,22vw)]"}`}
     >
       <div className="grid min-w-0 content-start gap-6">
         <div>
@@ -150,10 +114,7 @@ function Record() {
               blocked={blocked}
               initialDataset={prefill.dataset}
               initialTask={prefill.task}
-              onStarted={() => {
-                lastLogId.current = 0;
-                sessionId.current = null;
-              }}
+              onStarted={() => void recorder.refresh()}
             />
           )}
         </div>
@@ -168,7 +129,7 @@ function Record() {
           <HowTo />
         </aside>
       )}
-      <div className="min-w-0 xl:sticky xl:top-16 xl:self-start">
+      <div className="min-w-0 xl:sticky xl:top-14 xl:self-start">
         <CameraPreview />
       </div>
     </div>

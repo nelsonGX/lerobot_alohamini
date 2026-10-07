@@ -3,12 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
+import { useTopic } from "@/lib/live";
 import { Spinner } from "./ui";
 
 type Item = { key: string; label: string; hint: string; blocked: string | null; danger?: boolean; run: () => Promise<unknown> };
 
 export function QuickActions() {
-  const robot = usePoll(api.robot, 2000);
+  const robot = useTopic("robot");
   const settings = usePoll(api.settings, 10000);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);

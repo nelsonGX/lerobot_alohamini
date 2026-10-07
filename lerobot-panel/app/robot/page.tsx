@@ -6,10 +6,11 @@ import { ProcConsole, ProcStatus, useProc } from "@/components/Console";
 import { Button, Card, ErrorBox, Field, inputClass, LinkButton, Spinner, StatusIcon, Toggle, type Status } from "@/components/ui";
 import { api, type JetsonStatus } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
+import { useTopic } from "@/lib/live";
 
 export default function RobotPage() {
-  const robot = usePoll(api.robot, 1500);
-  const preflight = usePoll(api.preflight, 5000);
+  const robot = useTopic("robot");
+  const preflight = useTopic("preflight");
   const settings = usePoll(api.settings, 10000);
   const host = useProc("host");
   const teleop = useProc("teleop");

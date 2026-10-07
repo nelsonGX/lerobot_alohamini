@@ -12,13 +12,14 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import dataset_store
 from camera_feed import CameraFeed
+from live import Hub
 from config import EDIT_DATASET, REPO_ROOT, STATIC_DIR, Settings, load_settings, save_settings
 from preflight import run_checks
 from procs import AgentError, Controls, ProcBusy, agent_call, read_token, save_token
@@ -57,6 +58,10 @@ def put_settings(settings: Settings) -> Settings:
 
 @app.get("/api/preflight")
 def preflight() -> dict:
+    return _preflight()
+
+
+def _preflight() -> dict:
     settings = load_settings()
     checks = run_checks(settings, recorder_pid=recorder.pid(), panel_users=controls.leader_users(),
                         panel_pids=controls.leader_pids())  # fmt: skip
@@ -301,6 +306,50 @@ def proc_stop(name: str) -> dict:
         except (RuntimeError, OSError) as e:
             raise _proc_error(e) from e
     return {"ok": True}
+
+
+# ---------- live state over one WebSocket ----------
+
+hub = Hub()
+
+
+def _recorder_log_stream():
+    """Per-connection: only the log lines this browser hasn't seen; `reset` when a new session starts."""
+    last = {"id": 0, "session": None}
+
+    def next_lines():
+        snap = recorder.snapshot(last["id"])
+        sid = (snap["session"] or {}).get("id")
+        reset = sid != last["session"]
+        if reset:
+            snap = recorder.snapshot(0)
+            last["session"] = sid
+        lines = snap["log"]
+        if lines:
+            last["id"] = lines[-1]["id"]
+        return {"reset": reset, "lines": lines} if (reset or lines) else None
+
+    return next_lines
+
+
+def _proc_snapshot(name: str) -> dict:
+    p = _proc(name)
+    return {"proc": None if p is None else p.snapshot(-1)}
+
+
+hub.topic("recorder", 0.3, lambda: recorder.snapshot(10**12))
+hub.per_client("recorder.log", 0.3, _recorder_log_stream)
+hub.topic("robot", 1.0, robot_state)
+hub.topic("host", 0.25, host_telemetry)
+hub.topic("cameras", 1.0, cameras)
+hub.topic("preflight", 5.0, _preflight)
+hub.topic("job", 1.0, lambda: job.snapshot())
+hub.family("proc", 0.4, _proc_snapshot, lambda name: name in controls.procs)
+
+
+@app.websocket("/api/ws")
+async def live(sock: WebSocket) -> None:
+    await hub.serve(sock)
 
 
 # ---------- datasets ----------

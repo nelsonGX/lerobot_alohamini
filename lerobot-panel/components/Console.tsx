@@ -2,27 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, type ProcName, type ProcSnapshot } from "@/lib/api";
-import { usePoll } from "@/lib/hooks";
+import { procTopic, useTopic } from "@/lib/live";
 import { Button, ErrorBox, inputClass } from "./ui";
 
-/** Live state of a program the panel runs (host, teleop, calibration). */
+/** Live state of a program the panel runs (host, teleop, calibration), pushed by the backend. */
 export function useProc(name: ProcName) {
-  const version = useRef(-1);
+  const { data, error, refresh } = useTopic(procTopic(name));
+  const proc = data?.proc ?? null;
   const [lines, setLines] = useState<string[]>([]);
-  const [fast, setFast] = useState(false);
-  const poll = usePoll(
-    async () => {
-      const { proc } = await api.proc(name, version.current);
-      if (proc) {
-        version.current = proc.version;
-        if (proc.lines) setLines(proc.lines);
-      }
-      setFast(proc?.state !== undefined && proc.state !== "exited");
-      return proc;
-    },
-    fast ? 500 : 2500,
-  );
-  return { proc: poll.data, lines, error: poll.error, refresh: poll.refresh };
+  // Keep the last screen when a refresh carries no lines.
+  if (proc?.lines && proc.lines !== lines && JSON.stringify(proc.lines) !== JSON.stringify(lines)) setLines(proc.lines);
+  return { proc: data ? proc : undefined, lines, error, refresh };
 }
 
 export function ProcConsole({ name, proc, lines, onChange }: {

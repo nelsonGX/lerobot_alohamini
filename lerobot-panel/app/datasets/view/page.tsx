@@ -5,7 +5,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EpisodePlayer } from "@/components/EpisodePlayer";
 import { Button, Card, ErrorBox, IconButton, inputClass, Kbd, LinkButton, Modal, StatusIcon } from "@/components/ui";
-import { api, type DatasetDetail, type JobState } from "@/lib/api";
+import { api, type DatasetDetail } from "@/lib/api";
+import { useTopic } from "@/lib/live";
 import { cameraLabel, fmtAgo, fmtBytes, fmtDuration } from "@/lib/format";
 
 export default function DatasetViewPage() {
@@ -26,7 +27,6 @@ function DatasetView() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDrop, setConfirmDrop] = useState(false);
-  const [job, setJob] = useState<JobState | null>(null);
   const [showJob, setShowJob] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const load = useCallback(() => setReloadKey((k) => k + 1), []);
@@ -46,33 +46,19 @@ function DatasetView() {
     };
   }, [repo, reloadKey]);
 
-  // Track a running edit job for this dataset; reload when it finishes.
+  // Track a running edit job for this dataset (pushed by the backend); reload when it finishes.
+  const jobTopic = useTopic("job");
+  const job = jobTopic.data;
+  const wasRunning = useRef(false);
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout>;
-    let cancelled = false;
-    let wasRunning = false;
-    const tick = async () => {
-      try {
-        const j = await api.job();
-        if (cancelled) return;
-        setJob(j);
-        if (j.running && j.repo_id === repo) setShowJob(true);
-        if (wasRunning && !j.running && j.repo_id === repo) {
-          setSelected(new Set());
-          load();
-        }
-        wasRunning = j.running && j.repo_id === repo;
-      } catch {
-        /* ignore */
-      }
-      if (!cancelled) timer = setTimeout(tick, wasRunning ? 1000 : 5000);
-    };
-    tick();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [repo, load]);
+    if (!job) return;
+    const mine = job.running && job.repo_id === repo;
+    if (wasRunning.current && !job.running && job.repo_id === repo) {
+      setSelected(new Set());
+      load();
+    }
+    wasRunning.current = mine;
+  }, [job, repo, load]);
 
   const episodes = useMemo(() => ds?.episodes ?? [], [ds]);
   const current = episodes.find((e) => String(e.index) === epParam) ?? episodes[0];
@@ -171,7 +157,7 @@ function DatasetView() {
           This dataset is being recorded right now. New episodes appear here once the session finishes.
         </div>
       )}
-      {showJob && job && job.repo_id === repo && (
+      {(showJob || busy) && job && job.repo_id === repo && (
         <div className="rounded-lg border border-line bg-surface px-3 py-2 text-sm">
           <div className="flex items-center gap-2">
             <StatusIcon status={job.running ? "info" : job.status === "done" ? "ok" : "fail"} />
@@ -281,7 +267,7 @@ function DatasetView() {
         onStarted={() => {
           setConfirmDelete(false);
           setShowJob(true);
-          api.job().then(setJob);
+          jobTopic.refresh();
         }}
       />
       <DeleteDatasetModal open={confirmDrop} onClose={() => setConfirmDrop(false)} repo={repo} onDeleted={() => router.push("/datasets")} />
