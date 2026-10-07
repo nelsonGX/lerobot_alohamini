@@ -84,11 +84,8 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
           <div className="border-t border-line pt-4">
             <div className="mb-3 text-sm font-semibold">Jetson</div>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Username" hint="Set by Robot → Jetson → Connect">
-                <input className={inputClass} value={s.jetson_user} onChange={(e) => set("jetson_user", e.target.value.trim())} />
-              </Field>
-              <Field label="Repo folder" hint="Where ./host lives on the Jetson">
-                <input className={inputClass} value={s.jetson_repo} onChange={(e) => set("jetson_repo", e.target.value.trim())} />
+              <Field label="Agent port" hint="Port of ./agent on the Jetson">
+                <input className={inputClass} type="number" value={s.agent_port} onChange={(e) => set("agent_port", Number(e.target.value))} />
               </Field>
               <div className="col-span-2">
                 <Field label="Extra robot host flags" hint="--no_base skips the wheels and lift, like ./host">

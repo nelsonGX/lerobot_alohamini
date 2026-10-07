@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Panel agent: run this on the Jetson so the web panel can start/stop the robot host and
+# follower calibration and watch the Jetson, without SSH.
+# Usage: ./agent          prints a token on first run; paste it into the panel (Robot -> Jetson)
+#   AGENT_PORT=8765 ./agent
+set -euo pipefail
+cd "$(dirname "$0")"
+exec uv run --with 'fastapi>=0.115' --with 'uvicorn[standard]>=0.30' \
+  uvicorn --app-dir lerobot-panel/server agent:app --host 0.0.0.0 --port "${AGENT_PORT:-8765}"

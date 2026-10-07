@@ -1,6 +1,6 @@
 """Console programs the panel runs on behalf of teammates, so nobody needs a terminal.
 
-- host:      the robot host on the Jetson (over SSH), what ./host does
+- host:      the robot host on the Jetson (through the panel agent, ./agent there), what ./host does
 - teleop:    teleoperation without recording, what ./client does
 - calibrate: leader arm calibration here (./lcalibrate) or follower calibration on the Jetson (./fcalibrate)
 
@@ -11,10 +11,10 @@ prompts ("press ENTER") are detected so the UI can show buttons for them.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import pty
 import re
-import shlex
 import signal
 import socket
 import struct
@@ -23,12 +23,13 @@ import termios
 import threading
 import time
 
+import requests
+from websockets.sync.client import connect as ws_connect
+
 from config import DATA_DIR, PYTHON, REPO_ROOT, Settings
 from term import TermBuffer
 
-SSH_DIR = DATA_DIR / "ssh"
-SSH_KEY = SSH_DIR / "id_ed25519"
-KNOWN_HOSTS = SSH_DIR / "known_hosts"
+AGENT_TOKEN_FILE = DATA_DIR / "agent_token"
 HOST_MODULE = "lerobot.robots.alohamini.alohamini_host"
 
 # Prompts printed by lerobot's calibration code -> what the UI should offer.
@@ -48,11 +49,10 @@ class ProcBusy(RuntimeError):
 
 
 class ConsoleProcess:
-    def __init__(self, name: str, title: str, cmd: list[str], *, remote: bool, env: dict | None = None) -> None:
+    def __init__(self, name: str, title: str, cmd: list[str], *, env: dict | None = None) -> None:
         self.name = name
         self.title = title
         self.cmd = cmd
-        self.remote = remote  # ssh -tt: stop with Ctrl+C through the remote terminal
         self.screen = TermBuffer()
         self.started_at = time.time()
         self.ended_at: float | None = None
@@ -84,6 +84,10 @@ class ConsoleProcess:
     @property
     def running(self) -> bool:
         return self.exit_code is None
+
+    @property
+    def version(self) -> int:
+        return self.screen.version
 
     def _read(self) -> None:
         while True:
@@ -138,16 +142,10 @@ class ConsoleProcess:
         threading.Thread(target=escalate, daemon=True).start()
 
     def _interrupt(self) -> None:
-        if self.remote:
-            try:
-                os.write(self._master, b"\x03")  # forwarded to the Jetson's terminal -> SIGINT there
-            except OSError:
-                pass
-        else:
-            try:
-                os.killpg(self._proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
+        try:
+            os.killpg(self._proc.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
 
     def pids(self) -> set[int]:
         return {self._proc.pid} if self.running else set()
@@ -182,10 +180,10 @@ class ConsoleProcess:
             return snap
 
 
-# ---------- Jetson over SSH ----------
+# ---------- the Jetson, through its agent ----------
 
 
-def _tcp_open(host: str, port: int, timeout: float = 0.8) -> bool | None:
+def tcp_open(host: str, port: int, timeout: float = 0.8) -> bool | None:
     """True if listening, False if refused (machine up), None if unreachable."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -196,85 +194,150 @@ def _tcp_open(host: str, port: int, timeout: float = 0.8) -> bool | None:
         return None
 
 
-def ensure_key() -> str:
-    SSH_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not SSH_KEY.exists():
-        subprocess.run(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"lerobot-panel@{socket.gethostname()}", "-f", str(SSH_KEY)],
-            check=True,
-        )  # fmt: skip
-    return SSH_KEY.with_suffix(".pub").read_text().strip()
-
-
-def ssh_cmd(settings: Settings, script: str, *, tty: bool = False) -> list[str]:
-    """ssh into the Jetson and run `script` in a login shell from the repo directory."""
-    remote = "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; "
-    if settings.jetson_repo:
-        remote += f"cd {shlex.quote(settings.jetson_repo)} && "
-    remote += script
-    return [
-        "ssh", "-tt" if tty else "-T",
-        "-i", str(SSH_KEY),
-        "-o", "BatchMode=yes",
-        "-o", "IdentitiesOnly=yes",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
-        "-o", "ConnectTimeout=5",
-        "-o", "ServerAliveInterval=5",
-        "-o", "ServerAliveCountMax=3",
-        f"{settings.jetson_user}@{settings.jetson_ip}",
-        f"bash -lc {shlex.quote(remote)}",
-    ]  # fmt: skip
-
-
-def ssh_run(settings: Settings, script: str, timeout: float = 15) -> subprocess.CompletedProcess:
-    return subprocess.run(ssh_cmd(settings, script), capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-
-
-FIND_REPO = r"""for d in ~/lerobot_alohamini ~/*/ ~/*/*/; do d="${d%/}"; [ -f "$d/host" ] && [ -d "$d/src/lerobot" ] && echo "$d"; done | awk '!seen[$0]++' | head -n 5"""
-
-
-def setup_ssh(settings: Settings, user: str, password: str) -> dict:
-    """Install the panel's key on the Jetson with a one-time password login, then find the repo."""
-    pub = ensure_key()
-    askpass = SSH_DIR / "askpass.sh"
-    askpass.write_text('#!/bin/sh\nprintf "%s\\n" "$PANEL_SSH_PASSWORD"\n')
-    askpass.chmod(0o700)
-    install = (
-        "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && "
-        f"(grep -qxF {shlex.quote(pub)} ~/.ssh/authorized_keys || echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys)"
-    )
-    env = {**os.environ, "SSH_ASKPASS": str(askpass), "SSH_ASKPASS_REQUIRE": "force", "PANEL_SSH_PASSWORD": password, "DISPLAY": ":0"}
+def read_token() -> str:
     try:
-        res = subprocess.run(
-            ["ssh", "-T", "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
-             "-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password,keyboard-interactive",
-             "-o", "NumberOfPasswordPrompts=1", "-o", "ConnectTimeout=6",
-             f"{user}@{settings.jetson_ip}", install],
-            capture_output=True, text=True, timeout=25, env=env, stdin=subprocess.DEVNULL, start_new_session=True,
-        )  # fmt: skip
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"Timed out connecting to {settings.jetson_ip}") from e
-    if res.returncode != 0:
-        msg = res.stderr.strip().splitlines()[-1] if res.stderr.strip() else f"ssh exited with {res.returncode}"
-        if "Permission denied" in msg:
-            msg = "Wrong username or password."
-        raise RuntimeError(msg)
-
-    trial = settings.model_copy(update={"jetson_user": user, "jetson_repo": ""})
-    res = ssh_run(trial, FIND_REPO)
-    if res.returncode != 0:
-        raise RuntimeError("Key installed, but logging in with it failed: " + res.stderr.strip()[-300:])
-    repos = [r for r in res.stdout.split() if r]
-    return {"user": user, "repo": repos[0] if repos else "", "candidates": repos}
+        return AGENT_TOKEN_FILE.read_text().strip()
+    except OSError:
+        return ""
 
 
-def host_command(settings: Settings, cameras: bool) -> str:
-    args = f"--robot_model {shlex.quote(settings.robot_model)} {settings.host_args}"
-    if not cameras:
-        args += " --no_cameras"
-    # Piping through cat makes stdout a pipe, so the host prints plain logs instead of its full-screen dashboard.
-    return f"PYTHONUNBUFFERED=1 uv run python -m {HOST_MODULE} {args} 2>&1 | cat"
+def save_token(token: str) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    AGENT_TOKEN_FILE.write_text(token.strip())
+    AGENT_TOKEN_FILE.chmod(0o600)
+
+
+class AgentError(RuntimeError):
+    pass
+
+
+def agent_call(ip: str, port: int, method: str, path: str, *, token: str | None = None, body: dict | None = None, timeout: float = 5) -> dict:
+    token = read_token() if token is None else token
+    if not token:
+        raise AgentError("Connect the panel to the Jetson first (Robot page → Jetson).")
+    try:
+        res = requests.request(method, f"http://{ip}:{port}{path}", json=body, headers={"X-Panel-Token": token}, timeout=timeout)
+    except requests.RequestException as e:
+        raise AgentError(f"Cannot reach the panel agent on {ip}:{port}. Is ./agent running on the Jetson?") from e
+    if res.status_code == 401:
+        raise AgentError("The Jetson agent rejected the token. Reconnect on the Robot page.")
+    if res.status_code >= 400:
+        try:
+            detail = res.json().get("detail", res.text)
+        except ValueError:
+            detail = res.text
+        if res.status_code == 409:
+            raise ProcBusy(str(detail))
+        raise AgentError(str(detail)[:300])
+    return res.json()
+
+
+class AgentLink:
+    """Keeps one WebSocket open to the agent: program screens and Jetson health are pushed, never polled."""
+
+    def __init__(self) -> None:
+        self.target: tuple[str, int, str] | None = None
+        self.connected = False
+        self.auth_failed = False
+        self.system: dict | None = None
+        self.system_at = 0.0
+        self.procs: dict[str, dict] = {}
+        self._gen = 0
+        self._lock = threading.Lock()
+
+    def ensure(self, ip: str, port: int) -> None:
+        target = (ip, port, read_token())
+        if not target[2]:
+            return
+        with self._lock:
+            if target == self.target:
+                return
+            self._gen += 1
+            self.target, self.connected, self.auth_failed = target, False, False
+            self.system, self.procs = None, {}
+            threading.Thread(target=self._run, args=(self._gen, target), daemon=True).start()
+
+    def _run(self, gen: int, target: tuple[str, int, str]) -> None:
+        ip, port, token = target
+        while gen == self._gen:
+            try:
+                with ws_connect(f"ws://{ip}:{port}/ws?token={token}", open_timeout=4, close_timeout=1) as ws:
+                    self.connected, self.auth_failed = True, False
+                    while gen == self._gen:
+                        try:
+                            raw = ws.recv(timeout=6)
+                        except TimeoutError:
+                            raise OSError("agent stream went quiet") from None
+                        self._handle(gen, json.loads(raw))
+            except Exception as e:  # noqa: BLE001 - any failure just means "retry"
+                if getattr(e, "response", None) is not None and getattr(e.response, "status_code", 0) in (401, 403):
+                    self.auth_failed = True
+                elif "4401" in str(e):
+                    self.auth_failed = True
+            if gen == self._gen:
+                self.connected = False
+                time.sleep(2)
+
+    def _handle(self, gen: int, msg: dict) -> None:
+        if gen != self._gen:
+            return
+        if msg["type"] == "status":
+            self.system, self.system_at = msg["data"], time.time()
+            for name, info in msg["data"].get("procs", {}).items():
+                if info is None:
+                    self.procs.pop(name, None)
+        elif msg["type"] == "proc":
+            self.update_proc(msg["name"], msg["proc"])
+
+    def update_proc(self, name: str, snap: dict) -> None:
+        prev = self.procs.get(name) or {}
+        if "lines" not in snap and prev.get("started_at") == snap.get("started_at"):
+            snap = {**snap, "first_line": prev.get("first_line", 0), "lines": prev.get("lines", [])}
+        self.procs[name] = snap
+
+
+class RemoteProcess:
+    """A program running on the Jetson, with the same surface as ConsoleProcess."""
+
+    def __init__(self, name: str, title: str, link: AgentLink, ip: str, port: int) -> None:
+        self.name, self.title, self.link, self.ip, self.port = name, title, link, ip, port
+
+    @property
+    def _snap(self) -> dict:
+        snap = self.link.procs.get(self.name)
+        if snap is not None and not self.link.connected and snap["state"] != "exited":
+            # Lost the agent: show what we had, but don't claim it is still running.
+            return {**snap, "state": "exited", "exit_code": -1, "lines": [*snap.get("lines", []), "[panel] lost contact with the Jetson agent"]}
+        return snap or {"state": "exited", "exit_code": -1, "started_at": 0, "ended_at": None, "version": 0, "prompt": None, "lines": [], "first_line": 0}
+
+    @property
+    def running(self) -> bool:
+        return self._snap["state"] != "exited"
+
+    @property
+    def stopping(self) -> bool:
+        return self._snap["state"] == "stopping"
+
+    exit_code = property(lambda self: self._snap["exit_code"])
+    started_at = property(lambda self: self._snap["started_at"])
+    ended_at = property(lambda self: self._snap["ended_at"])
+    version = property(lambda self: self._snap["version"])
+
+    def snapshot(self, version: int = -1) -> dict:
+        snap = dict(self._snap)
+        if version == snap["version"]:
+            snap.pop("lines", None)
+            snap.pop("first_line", None)
+        return snap
+
+    def write(self, text: str) -> None:
+        agent_call(self.ip, self.port, "POST", f"/proc/{self.name}/input", body={"text": text})
+
+    def stop(self) -> None:
+        agent_call(self.ip, self.port, "POST", f"/proc/{self.name}/stop")
+
+    def pids(self) -> set[int]:
+        return set()
 
 
 # ---------- the controller ----------
@@ -283,11 +346,11 @@ def host_command(settings: Settings, cameras: bool) -> str:
 class Controls:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.procs: dict[str, ConsoleProcess | None] = {"host": None, "teleop": None, "calibrate": None}
+        self.procs: dict[str, ConsoleProcess | RemoteProcess | None] = {"host": None, "teleop": None, "calibrate": None}
         self.calibrate_target: str | None = None  # leader | follower
-        self._jetson_cache: tuple[float, str, dict] | None = None
+        self.link = AgentLink()
 
-    def _running(self, name: str) -> ConsoleProcess | None:
+    def _running(self, name: str) -> ConsoleProcess | RemoteProcess | None:
         p = self.procs[name]
         return p if p and p.running else None
 
@@ -307,7 +370,7 @@ class Controls:
                 pids |= p.pids()
         return pids
 
-    def _start(self, name: str, proc_factory) -> ConsoleProcess:
+    def _start(self, name: str, proc_factory) -> ConsoleProcess | RemoteProcess:
         with self._lock:
             if self._running(name):
                 raise ProcBusy(f"{self.procs[name].title} is already running")
@@ -317,47 +380,61 @@ class Controls:
 
     # --- Jetson host ---
 
-    def jetson_status(self, settings: Settings, fresh: bool = False) -> dict:
-        key = f"{settings.jetson_ip}:{settings.obs_port}"
-        cached = self._jetson_cache
-        if not fresh and cached and cached[1] == key and time.time() - cached[0] < 2.5:
-            return cached[2]
-        ssh_port = _tcp_open(settings.jetson_ip, 22)
-        host_port = _tcp_open(settings.jetson_ip, settings.obs_port) if ssh_port is not None else None
-        managed = self._running("host")
-        status = {
-            "ip": settings.jetson_ip,
-            "reachable": ssh_port is not None,
-            "ssh_configured": bool(settings.jetson_user and SSH_KEY.exists()),
-            "user": settings.jetson_user,
-            "repo": settings.jetson_repo,
-            "host_listening": bool(host_port),
-            "host_managed": managed is not None,
-        }
-        self._jetson_cache = (time.time(), key, status)
-        return status
+    def _adopt(self, settings: Settings) -> None:
+        """Pick up programs the agent already runs (e.g. after the panel restarted)."""
+        for name, title in (("host", "Robot host"), ("calibrate", "Follower arm calibration")):
+            snap = self.link.procs.get(name)
+            if snap and snap["state"] != "exited" and not self._running(name):
+                self.procs[name] = RemoteProcess(name, title, self.link, settings.jetson_ip, settings.agent_port)
+                if name == "calibrate":
+                    self.calibrate_target = "follower"
 
-    def start_host(self, settings: Settings, cameras: bool) -> ConsoleProcess:
-        if not settings.jetson_user or not SSH_KEY.exists():
+    def jetson_status(self, settings: Settings) -> dict:
+        self.link.ensure(settings.jetson_ip, settings.agent_port)
+        if self.link.connected:
+            reachable = agent_running = agent_ok = True
+            self._adopt(settings)
+        else:
+            port = tcp_open(settings.jetson_ip, settings.agent_port)
+            reachable = port is not None or tcp_open(settings.jetson_ip, 22) is not None
+            agent_running, agent_ok = bool(port), False
+        host_port = tcp_open(settings.jetson_ip, settings.obs_port) if reachable else None
+        fresh = self.link.system and time.time() - self.link.system_at < 6
+        return {
+            "ip": settings.jetson_ip,
+            "reachable": reachable,
+            "agent_running": agent_running,
+            "agent_ok": agent_ok,
+            "token_set": bool(read_token()),
+            "token_rejected": self.link.auth_failed,
+            "host_listening": bool(host_port),
+            "host_managed": self._running("host") is not None,
+            "system": self.link.system if fresh else None,
+        }
+
+    def _remote_start(self, settings: Settings, name: str, title: str, *, cameras: bool = False) -> RemoteProcess:
+        self.link.ensure(settings.jetson_ip, settings.agent_port)
+        body = {"name": name, "robot_model": settings.robot_model, "host_args": settings.host_args, "cameras": cameras}
+        snap = agent_call(settings.jetson_ip, settings.agent_port, "POST", "/start", body=body)
+        self.link.update_proc(name, snap)
+        return RemoteProcess(name, title, self.link, settings.jetson_ip, settings.agent_port)
+
+    def start_host(self, settings: Settings, cameras: bool) -> RemoteProcess:
+        if not read_token():
             raise RuntimeError("Connect the panel to the Jetson first (Robot page → Jetson).")
         if self._running("calibrate") and self.calibrate_target == "follower":
             raise ProcBusy("Follower calibration is running on the Jetson; finish it first.")
-        if _tcp_open(settings.jetson_ip, settings.obs_port):
+        if tcp_open(settings.jetson_ip, settings.obs_port):
             raise ProcBusy("A robot host is already running on the Jetson (started outside the panel). Stop it first.")
-        cmd = ssh_cmd(settings, host_command(settings, cameras), tty=True)
-        self._jetson_cache = None
-        return self._start("host", lambda: ConsoleProcess("host", "Robot host", cmd, remote=True))
+        return self._start("host", lambda: self._remote_start(settings, "host", "Robot host", cameras=cameras))
 
     def stop_host(self, settings: Settings) -> str:
-        self._jetson_cache = None
         if p := self._running("host"):
             p.stop()
             return "stopping"
-        # Started from a terminal on the Jetson: interrupt it there.
-        res = ssh_run(settings, f"pkill -INT -f {shlex.quote(HOST_MODULE)} && echo stopped || echo none", timeout=15)
-        if res.returncode != 0 and not res.stdout:
-            raise RuntimeError(res.stderr.strip()[-300:] or "Could not reach the Jetson over SSH")
-        return "stopping" if "stopped" in res.stdout else "not running"
+        # Started from a terminal on the Jetson: have the agent interrupt it.
+        res = agent_call(settings.jetson_ip, settings.agent_port, "POST", "/host/kill")
+        return res["result"]
 
     # --- teleop & calibration ---
 
@@ -373,9 +450,9 @@ class Controls:
             "--teleop.id", settings.teleop_id,
             "--teleop.arm_profile", settings.arm_profile,
         ]  # fmt: skip
-        return self._start("teleop", lambda: ConsoleProcess("teleop", "Teleoperation", cmd, remote=False))
+        return self._start("teleop", lambda: ConsoleProcess("teleop", "Teleoperation", cmd))
 
-    def start_calibration(self, settings: Settings, target: str, recorder_active: bool) -> ConsoleProcess:
+    def start_calibration(self, settings: Settings, target: str, recorder_active: bool) -> ConsoleProcess | RemoteProcess:
         if self._running("calibrate"):
             raise ProcBusy("A calibration is already running.")
         if target == "leader":
@@ -386,21 +463,18 @@ class Controls:
                 "--teleop.id", settings.teleop_id,
                 "--teleop.arm_profile", settings.arm_profile,
             ]  # fmt: skip
-            factory = lambda: ConsoleProcess("calibrate", "Leader arm calibration", cmd, remote=False)  # noqa: E731
+            factory = lambda: ConsoleProcess("calibrate", "Leader arm calibration", cmd)  # noqa: E731
         else:
-            if not settings.jetson_user or not SSH_KEY.exists():
+            if not read_token():
                 raise RuntimeError("Connect the panel to the Jetson first.")
-            if self._running("host") or _tcp_open(settings.jetson_ip, settings.obs_port):
+            if self._running("host") or tcp_open(settings.jetson_ip, settings.obs_port):
                 raise ProcBusy("Stop the robot host first: it is using the follower arms.")
-            no_base = " --no_base" if "--no_base" in settings.host_args else ""
-            script = f"uv run python -m lerobot.robots.alohamini.alohamini_calibrate --robot_model {shlex.quote(settings.robot_model)}{no_base}"
-            cmd = ssh_cmd(settings, script, tty=True)
-            factory = lambda: ConsoleProcess("calibrate", "Follower arm calibration", cmd, remote=True)  # noqa: E731
+            factory = lambda: self._remote_start(settings, "calibrate", "Follower arm calibration")  # noqa: E731
         proc = self._start("calibrate", factory)
         self.calibrate_target = target
         return proc
 
-    def get(self, name: str) -> ConsoleProcess | None:
+    def get(self, name: str) -> ConsoleProcess | RemoteProcess | None:
         if name not in self.procs:
             raise KeyError(name)
         return self.procs[name]
@@ -408,20 +482,24 @@ class Controls:
     def overview(self) -> dict:
         out = {}
         for name, p in self.procs.items():
-            out[name] = None if p is None else {
+            if p is None:
+                out[name] = None
+                continue
+            snap = p.snapshot(p.version)
+            out[name] = {
                 "title": p.title,
-                "state": "running" if p.running and not p.stopping else "stopping" if p.running else "exited",
+                "state": snap["state"],
                 "exit_code": p.exit_code,
                 "stopped": p.stopping,
                 "started_at": p.started_at,
                 "ended_at": p.ended_at,
-                "waiting_for_input": p.snapshot(p.screen.version)["prompt"] is not None,
+                "waiting_for_input": snap["prompt"] is not None,
             }  # fmt: skip
         out["calibrate_target"] = self.calibrate_target
         return out
 
     def shutdown(self) -> None:
+        """Stop local programs. Programs on the Jetson belong to its agent and keep running; the panel re-adopts them."""
         for p in self.procs.values():
-            if p and p.running:
+            if isinstance(p, ConsoleProcess) and p.running:
                 p.stop()
-

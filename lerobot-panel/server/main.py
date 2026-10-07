@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 import dataset_store
 from config import EDIT_DATASET, REPO_ROOT, STATIC_DIR, Settings, load_settings, save_settings
 from preflight import run_checks
-from procs import SSH_KEY, Controls, ProcBusy, setup_ssh
+from procs import AgentError, Controls, ProcBusy, agent_call, read_token, save_token
 from recorder import Recorder, RecorderBusy, load_history
 
 recorder = Recorder()
@@ -63,7 +63,7 @@ def preflight() -> dict:
             continue
         if host and host.running:
             c.update(status="warn", detail="The robot host is starting on the Jetson…", hint="", action="")
-        elif c["action"] == "start_host" and not (settings.jetson_user and SSH_KEY.exists()):
+        elif c["action"] == "start_host" and not read_token():
             c.update(action="setup_jetson", hint="Connect the panel to the Jetson on the Robot page, then start the host there.")
     return {"checks": checks, "checked_at": time.time()}
 
@@ -151,19 +151,19 @@ def robot_state() -> dict:
 
 
 class JetsonSetupRequest(BaseModel):
-    user: str = Field(min_length=1, max_length=64, pattern=r"^[a-z_][a-z0-9_.-]*$")
-    password: str = Field(min_length=1, max_length=200)
+    token: str = Field(min_length=8, max_length=200, pattern=r"^\S+$")
 
 
 @app.post("/api/jetson/setup")
 def jetson_setup(req: JetsonSetupRequest) -> dict:
+    """Check the token the agent printed, then remember it."""
     settings = load_settings()
     try:
-        result = setup_ssh(settings, req.user, req.password)
-    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        info = agent_call(settings.jetson_ip, settings.agent_port, "GET", "/status", token=req.token)
+    except AgentError as e:
         raise HTTPException(400, str(e)) from e
-    save_settings(settings.model_copy(update={"jetson_user": result["user"], "jetson_repo": result["repo"]}))
-    return result
+    save_token(req.token)
+    return {"hostname": info["hostname"], "repo": info["repo"]}
 
 
 class HostStartRequest(BaseModel):
@@ -188,7 +188,7 @@ def host_stop() -> dict:
         raise HTTPException(409, "A recording is running. Stop it before stopping the robot host.")
     try:
         return {"result": controls.stop_host(load_settings())}
-    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+    except (RuntimeError, OSError) as e:
         raise _proc_error(e) from e
 
 
@@ -249,7 +249,10 @@ def proc_stop(name: str) -> dict:
         return host_stop()
     p = _proc(name)
     if p is not None:
-        p.stop()
+        try:
+            p.stop()
+        except (RuntimeError, OSError) as e:
+            raise _proc_error(e) from e
     return {"ok": True}
 
 

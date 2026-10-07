@@ -61,8 +61,8 @@ export default function RobotPage() {
 
       {/* Readiness overview */}
       <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Step n={1} title="Jetson connected" status={!j ? "idle" : j.ssh_configured && j.reachable ? "ok" : "fail"}
-          detail={!j ? "…" : !j.reachable ? `${j.ip} not reachable` : j.ssh_configured ? `${j.user}@${j.ip}` : "Set up access below"} />
+        <Step n={1} title="Jetson connected" status={!j ? "idle" : j.agent_ok ? "ok" : "fail"}
+          detail={!j ? "…" : !j.reachable ? `${j.ip} not reachable` : j.agent_ok ? `${j.system?.hostname ?? j.ip} (agent running)` : !j.agent_running ? "Start ./agent on the Jetson" : "Enter the agent token below"} />
         <Step n={2} title="Robot host" status={hostState.status} detail={hostState.label} />
         <Step n={3} title="Leader arms" status={!checks.length ? "idle" : leadersOk ? "ok" : "fail"}
           detail={!checks.length ? "…" : leadersOk ? "Both plugged in" : (leaderChecks.find((c) => c.status !== "ok")?.detail ?? "")} />
@@ -77,6 +77,7 @@ export default function RobotPage() {
         {/* Jetson + host */}
         <div className="grid content-start gap-6">
           <JetsonCard j={j} onDone={() => { robot.refresh(); settings.refresh(); }} />
+          {j && <JetsonMonitor j={j} />}
 
           <Card
             title={<span className="flex items-center gap-2"><StatusIcon status={hostState.status} /> Robot host (Jetson)</span>}
@@ -100,10 +101,10 @@ export default function RobotPage() {
               ) : (
                 <Button
                   variant="primary"
-                  disabled={!j?.ssh_configured || !j?.reachable}
+                  disabled={!j?.agent_ok}
                   loading={busy === "host"}
                   loadingText="Starting…"
-                  title={!j?.ssh_configured ? "Connect to the Jetson first" : !j?.reachable ? "Jetson is not reachable" : undefined}
+                  title={!j?.agent_ok ? "Connect to the Jetson agent first" : undefined}
                   onClick={() => run("host", () => api.hostStart(camerasOn), host.refresh)}
                 >
                   Start host
@@ -186,7 +187,7 @@ export default function RobotPage() {
                   detail="The robot host must be stopped first, because it uses the follower arms."
                   loading={busy === "cal" && calTarget === "follower"}
                   active={calibrate.proc?.state === "running" && calTarget === "follower"}
-                  blockedReason={calibrate.proc?.state === "running" ? "A calibration is already running" : !j?.ssh_configured ? "Connect to the Jetson first" : j?.host_listening || hostRunning ? "Stop the robot host first" : null}
+                  blockedReason={calibrate.proc?.state === "running" ? "A calibration is already running" : !j?.agent_ok ? "Connect to the Jetson first" : j?.host_listening || hostRunning ? "Stop the robot host first" : null}
                   onClick={() => run("cal", () => api.calibrateStart("follower"), calibrate.refresh)}
                 />
               </div>
@@ -264,22 +265,18 @@ function CalButton({ title, detail, blockedReason, loading, active, onClick }: {
 
 function JetsonCard({ j, onDone }: { j: JetsonStatus | undefined; onDone: () => void }) {
   const [editing, setEditing] = useState(false);
-  const [user, setUser] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
-  const showForm = editing || (j && !j.ssh_configured);
+  const showForm = editing || (j && j.reachable && j.agent_running && !j.agent_ok);
 
   const connect = async () => {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.jetsonSetup(user.trim(), password);
-      setPassword("");
+      await api.jetsonSetup(token.trim());
+      setToken("");
       setEditing(false);
-      setResult(r.repo ? `Connected. Found the robot code in ${r.repo}.` : "Connected, but could not find the lerobot_alohamini folder. Set it under Settings → Jetson repo folder.");
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -290,8 +287,8 @@ function JetsonCard({ j, onDone }: { j: JetsonStatus | undefined; onDone: () => 
 
   return (
     <Card
-      title={<span className="flex items-center gap-2"><StatusIcon status={!j ? "idle" : j.ssh_configured && j.reachable ? "ok" : "fail"} /> Jetson</span>}
-      actions={j?.ssh_configured && !editing && <Button size="sm" variant="ghost" onClick={() => { setEditing(true); setUser(j.user); }}>Reconnect</Button>}
+      title={<span className="flex items-center gap-2"><StatusIcon status={!j ? "idle" : j.agent_ok ? "ok" : "fail"} /> Jetson</span>}
+      actions={j?.agent_ok && !editing && <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>Change token</Button>}
     >
       {!j ? (
         <p className="text-sm text-muted">Checking…</p>
@@ -302,59 +299,30 @@ function JetsonCard({ j, onDone }: { j: JetsonStatus | undefined; onDone: () => 
               Cannot reach {j.ip}. Check the Jetson is powered on and on the network, and that the IP in Settings (gear icon) is right.
             </ErrorBox>
           )}
-          {j.ssh_configured && !editing && (
+          {j.reachable && !j.agent_running && (
+            <ErrorBox>
+              The panel agent is not running on the Jetson. Open a terminal there once and run <code className="font-mono">./agent</code> in the
+              repo (or install it as a service, see the panel README). It prints a token to paste here.
+            </ErrorBox>
+          )}
+          {j.token_rejected && !editing && <ErrorBox>The agent rejected the saved token. Paste the current one below.</ErrorBox>}
+          {j.agent_ok && !editing && j.system && (
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-ink-2">
-              <dt className="text-muted">Login</dt><dd className="font-mono">{j.user}@{j.ip}</dd>
-              <dt className="text-muted">Robot code</dt><dd className="break-all font-mono">{j.repo || "home folder (not found; set in Settings)"}</dd>
+              <dt className="text-muted">Machine</dt><dd className="font-mono">{j.system.hostname} · {j.ip}</dd>
+              <dt className="text-muted">Robot code</dt><dd className="break-all font-mono">{j.system.repo}</dd>
             </dl>
           )}
-          {result && <p className="text-good-ink">{result}</p>}
           {showForm && (
-            <form
-              className="grid gap-3"
-              onSubmit={(e) => {
-                e.preventDefault();
-                connect();
-              }}
-            >
+            <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); connect(); }}>
               <p className="text-ink-2">
-                One-time setup: log in to the Jetson once so the panel can start the robot host for everyone. The password is used
-                once to install a key and is not stored.
+                Paste the token that <code className="font-mono">./agent</code> printed on the Jetson (also in <code className="font-mono">lerobot-panel/.data/agent_token</code> there).
               </p>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Jetson username">
-                  <input className={inputClass} value={user} onChange={(e) => setUser(e.target.value)} autoComplete="off" spellCheck={false} autoFocus required />
-                </Field>
-                <Field label="Password">
-                  <div className="relative">
-                    <input
-                      className={`${inputClass} pr-16`}
-                      type={showPassword ? "text" : "password"}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      autoComplete="off"
-                      required
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((v) => !v)}
-                      className="absolute inset-y-1 right-1 rounded-md px-2 text-xs font-medium text-ink-2 hover:bg-surface-2 hover:text-ink"
-                    >
-                      {showPassword ? "Hide" : "Show"}
-                    </button>
-                  </div>
-                </Field>
-              </div>
+              <Field label="Agent token">
+                <input className={`${inputClass} font-mono`} value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" spellCheck={false} autoFocus required />
+              </Field>
               {error && <ErrorBox>{error}</ErrorBox>}
               <div className="flex gap-2">
-                <Button
-                  type="submit"
-                  variant="primary"
-                  disabled={!user || !password || !j.reachable}
-                  loading={busy}
-                  loadingText="Connecting…"
-                  title={!j.reachable ? "Jetson is not reachable" : undefined}
-                >
+                <Button type="submit" variant="primary" disabled={!token.trim() || !j.agent_running} loading={busy} loadingText="Connecting…">
                   Connect
                 </Button>
                 {editing && <Button type="button" onClick={() => setEditing(false)}>Cancel</Button>}
@@ -363,6 +331,49 @@ function JetsonCard({ j, onDone }: { j: JetsonStatus | undefined; onDone: () => 
           )}
         </div>
       )}
+    </Card>
+  );
+}
+
+const fmtGB = (b: number) => `${(b / 1e9).toFixed(b > 1e11 ? 0 : 1)} GB`;
+const fmtUp = (s: number) => (s >= 86400 ? `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h` : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(s / 60)}m`);
+
+function Meter({ label, pct, detail }: { label: string; pct: number; detail: string }) {
+  const tone = pct > 90 ? "bg-critical" : pct > 75 ? "bg-warn" : "bg-accent";
+  return (
+    <div>
+      <div className="flex justify-between text-xs"><span className="text-muted">{label}</span><span className="font-mono text-ink-2">{detail}</span></div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-2"><div className={`h-full ${tone}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} /></div>
+    </div>
+  );
+}
+
+function JetsonMonitor({ j }: { j: JetsonStatus }) {
+  const s = j.system;
+  if (!j.agent_ok || !s) return null;
+  const hot = Math.max(0, ...s.temps.map((t) => t.c));
+  return (
+    <Card title="Jetson monitor" actions={<span className="text-xs text-muted">up {fmtUp(s.uptime_s)} · live</span>}>
+      <div className="grid gap-4 text-sm sm:grid-cols-2">
+        <div className="grid gap-3">
+          <Meter label="CPU" pct={s.cpu_percent ?? 0} detail={`${s.cpu_percent ?? "?"}% · ${s.cpus} cores · load ${s.load[0].toFixed(2)}`} />
+          <Meter label="Memory" pct={(100 * s.mem.used) / s.mem.total} detail={`${fmtGB(s.mem.used)} / ${fmtGB(s.mem.total)}`} />
+          <Meter label="Disk" pct={(100 * s.disk.used) / s.disk.total} detail={`${fmtGB(s.disk.used)} / ${fmtGB(s.disk.total)}`} />
+          {s.temps.length > 0 && <Meter label="Hottest sensor" pct={hot} detail={`${hot.toFixed(0)} °C`} />}
+        </div>
+        <div>
+          <div className="mb-1 text-xs text-muted">Devices</div>
+          {s.devices.length === 0 ? (
+            <p className="text-ink-2">No robot devices found (no <code className="font-mono">/dev/am_*</code> links). Are the arm adapters plugged in?</p>
+          ) : (
+            <ul className="grid gap-1 font-mono text-xs">
+              {s.devices.map((d) => (
+                <li key={d.name} className="flex items-center gap-2"><StatusIcon status={d.ok ? "ok" : "fail"} /> {d.name}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
     </Card>
   );
 }
