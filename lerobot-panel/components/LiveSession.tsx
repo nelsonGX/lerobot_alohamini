@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, type Phase, type Session } from "@/lib/api";
-import { fmtDuration, fmtTime } from "@/lib/format";
+import { fmtDuration } from "@/lib/format";
 import { useLocalStorage } from "@/lib/hooks";
 import { PHASE_META } from "./phase";
 import { Button, Card, ErrorBox, Kbd, LinkButton, Modal, Spinner, StatusIcon, Toggle } from "./ui";
@@ -99,115 +99,118 @@ export function LiveSession({
   const fpsLow = s.live_fps != null && s.live_fps < s.fps * 0.9;
   const discarded = s.episodes.filter((e) => e.status === "discarded").length;
 
+  const kept = s.episodes.filter((e) => e.status !== "discarded");
+  const slots = Math.max(s.num_episodes, kept.length);
+  const lastLive = kept.at(-1) && ["recording", "resetting", "saving"].includes(kept.at(-1)!.status);
+  const curIdx = lastLive ? kept.length - 1 : kept.length;
+  const pad = (n: number) => String(n).padStart(2, "0");
+
   return (
-    <div className="grid gap-4">
-      {/* Phase banner */}
-      <section
-        className="overflow-hidden rounded-3xl border border-line shadow-[var(--shadow)]"
-        style={{ background: `linear-gradient(135deg, color-mix(in srgb, ${meta.color} 16%, var(--surface)), var(--surface) 65%)` }}
-      >
-        <div className="grid gap-6 p-5 md:grid-cols-[1fr_auto]">
+    <div className="grid gap-6">
+      {/* The stage: one screen with everything the operator needs, no boxes */}
+      <section className="border-y border-line">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line py-3">
+          <span className="flex items-center gap-2 font-mono text-sm font-semibold uppercase tracking-wider">
+            <span className={`size-2.5 rounded-full ${s.phase === "recording" ? "pulse-dot" : ""}`} style={{ background: meta.color }} aria-hidden />
+            {meta.label}
+          </span>
+          {s.episode != null && s.active && (
+            <span className="tabular font-mono text-sm text-muted">
+              EP {pad(s.episode)}/{pad(s.num_episodes)}
+            </span>
+          )}
+          <span className="ml-auto text-sm text-ink-2">{meta.description}</span>
+        </div>
+
+        <div className="grid gap-8 py-8 md:grid-cols-[1fr_20rem] md:gap-12 md:py-12">
           <div className="min-w-0">
-            <div className="flex items-center gap-3">
-              <span
-                className={`size-3.5 rounded-full ${s.phase === "recording" ? "pulse-dot" : ""}`}
-                style={{ background: meta.color, boxShadow: `0 0 0 5px color-mix(in srgb, ${meta.color} 25%, transparent)` }}
-                aria-hidden
-              />
-              <span className="text-2xl font-semibold tracking-tight">{meta.label}</span>
-              {s.episode != null && s.active && <span className="tabular text-lg text-ink-2">Episode {s.episode}</span>}
-            </div>
-            <p className="mt-1 text-ink-2">{meta.description}</p>
-            <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-              <dt className="text-muted">Dataset</dt>
-              <dd className="truncate font-mono">{s.dataset}{s.resume && <span className="ml-2 font-sans text-xs text-muted">(appending)</span>}</dd>
-              <dt className="text-muted">Task</dt>
-              <dd className="truncate">{s.task}</dd>
-              <dt className="text-muted">Operator</dt>
-              <dd>{s.operator || "—"} · started {fmtTime(s.started_at)}</dd>
-            </dl>
-          </div>
-          <div className="flex items-center gap-6 md:justify-end">
-            {s.active && s.remaining_s != null && (
-              <div className="text-right">
-                <div className="tabular text-6xl font-semibold leading-none">{s.remaining_s}<span className="text-2xl text-muted">s</span></div>
-                <div className="mt-1 text-xs text-muted">{s.phase === "recording" ? "until episode auto-ends" : "until next episode"}</div>
-              </div>
+            {s.active && s.remaining_s != null ? (
+              <>
+                <div className="tabular font-mono text-[clamp(5rem,16vw,11rem)] font-medium leading-[0.85] tracking-tighter">
+                  {pad(s.remaining_s)}
+                  <span className="ml-2 text-[0.22em] tracking-normal text-muted">sec</span>
+                </div>
+                <div className="eyebrow mt-4">{s.phase === "recording" ? "until episode auto-ends" : "until next episode"}</div>
+              </>
+            ) : (
+              <div className="font-mono text-6xl font-medium tracking-tighter text-ink-2">{meta.label}</div>
             )}
           </div>
+
+          <dl className="self-end font-mono text-sm">
+            <Row k="Dataset" v={`${s.dataset}${s.resume ? " +" : ""}`} />
+            <Row k="Task" v={s.task} />
+            <Row k="Operator" v={s.operator || "—"} />
+            <Row k="Capture" v={s.live_fps != null ? `${s.live_fps.toFixed(1)} / ${s.fps} fps` : "–"} bad={fpsLow} />
+            <Row k="Elapsed" v={fmtDuration((s.ended_at ?? s.now) - s.started_at)} />
+            <Row k="Discarded" v={String(discarded)} />
+          </dl>
         </div>
-        {progress != null && (
-          <div className="mx-5 mb-5 h-2.5 overflow-hidden rounded-full bg-surface-2">
-            <div className="h-full rounded-full transition-[width] duration-500 ease-linear" style={{ width: `${progress * 100}%`, background: meta.color }} />
+
+        {/* Timeline: one segment per episode; the live one fills with the countdown */}
+        <div className="pb-6">
+          <ul className="flex gap-1.5" aria-label="Episode progress">
+            {Array.from({ length: slots }, (_, i) => {
+              const st = kept[i]?.status;
+              const cur = s.active && i === curIdx;
+              return (
+                <li key={i} className="h-2 flex-1 overflow-hidden rounded-[2px] bg-surface-2" title={`Episode ${i + 1}`}>
+                  <div
+                    className="h-full transition-[width] duration-500 ease-linear"
+                    style={{
+                      width: st === "saved" ? "100%" : cur ? `${(progress ?? 0) * 100}%` : "0%",
+                      background: cur ? meta.color : "var(--ink)",
+                    }}
+                  />
+                </li>
+              );
+            })}
+          </ul>
+          <div className="eyebrow mt-2 flex justify-between">
+            <span>{s.saved_count} of {s.num_episodes} saved</span>
+            {s.stop_requested && <span>finishing after this step…</span>}
+          </div>
+        </div>
+
+        {s.active && (
+          <div className="flex flex-wrap items-stretch gap-3 border-t border-line py-5">
+            {s.phase === "recording" || s.phase === "resetting" ? (
+              <>
+                <Button variant="primary" size="lg" className="h-16 min-w-72 flex-1 text-lg md:flex-none" disabled={!!pending} loading={pending === "next"} onClick={() => send("next")}>
+                  {s.phase === "recording" ? "Done — save episode" : "Scene reset — start next"} <Kbd>N</Kbd>
+                </Button>
+                <Button size="lg" className="h-16" disabled={!!pending} loading={pending === "rerecord"} onClick={() => send("rerecord")}>
+                  {s.phase === "recording" ? "Redo" : `Discard #${s.episode} & redo`} <Kbd>R</Kbd>
+                </Button>
+              </>
+            ) : (
+              <p className="self-center text-sm text-muted">Controls unlock when recording or resetting.</p>
+            )}
+            <div className="ml-auto flex flex-wrap items-center gap-2 self-center">
+              <Toggle size="sm" checked={voice} onChange={setVoice} label="Voice" />
+              <Button size="sm" variant="ghost" disabled={!controllable || !!pending} loading={pending === "stop"} onClick={() => send("stop")}>
+                Save &amp; finish <Kbd>Q</Kbd>
+              </Button>
+              <Button size="sm" variant="ghost" disabled={!controllable || !!pending} loading={pending === "discard_stop"} onClick={() => send("discard_stop")}>
+                Discard &amp; finish
+              </Button>
+              <Button size="sm" variant="ghost" className="text-critical-ink" onClick={() => setConfirmAbort(true)}>
+                Force stop
+              </Button>
+            </div>
+          </div>
+        )}
+        {(pending || error) && (
+          <div className="border-t border-line py-3">
+            {pending && (
+              <p className="pop-in flex items-center gap-1.5 text-xs text-ink-2" role="status">
+                <Spinner className="size-3.5" /> Sent — waiting for the recorder…
+              </p>
+            )}
+            {error && <ErrorBox>{error}</ErrorBox>}
           </div>
         )}
       </section>
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat label="Saved this session" value={`${s.saved_count} / ${s.num_episodes}`} />
-        <Stat label="Discarded" value={String(discarded)} />
-        <Stat
-          label="Capture rate"
-          value={s.live_fps != null ? `${s.live_fps.toFixed(1)} fps` : "–"}
-          sub={`target ${s.fps}`}
-          status={s.live_fps == null ? undefined : fpsLow ? "warn" : "ok"}
-        />
-        <Stat label="Elapsed" value={fmtDuration((s.ended_at ?? s.now) - s.started_at)} />
-      </div>
-
-      {/* Controls */}
-      {s.active && (
-        <Card
-          title="Controls"
-          actions={
-            <Toggle size="sm" checked={voice} onChange={setVoice} label="Voice cues" />
-          }
-        >
-          {s.phase === "recording" ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Button variant="good" size="lg" disabled={!!pending} loading={pending === "next"} onClick={() => send("next")}>
-                Episode done — save it <Kbd>N</Kbd>
-              </Button>
-              <Button variant="warn" size="lg" disabled={!!pending} loading={pending === "rerecord"} onClick={() => send("rerecord")}>
-                Mistake — discard &amp; redo <Kbd>R</Kbd>
-              </Button>
-            </div>
-          ) : s.phase === "resetting" ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Button variant="primary" size="lg" disabled={!!pending} loading={pending === "next"} onClick={() => send("next")}>
-                Scene is reset — start next <Kbd>N</Kbd>
-              </Button>
-              <Button variant="warn" size="lg" disabled={!!pending} loading={pending === "rerecord"} onClick={() => send("rerecord")}>
-                Discard episode {s.episode} &amp; redo <Kbd>R</Kbd>
-              </Button>
-            </div>
-          ) : (
-            <p className="text-sm text-muted">{meta.description} Controls unlock when recording or resetting.</p>
-          )}
-          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
-            <Button size="sm" disabled={!controllable || !!pending} loading={pending === "stop"} onClick={() => send("stop")}>
-              Save &amp; finish session <Kbd>Q</Kbd>
-            </Button>
-            <Button size="sm" disabled={!controllable || !!pending} loading={pending === "discard_stop"} onClick={() => send("discard_stop")}>
-              Discard current &amp; finish
-            </Button>
-            <Button size="sm" variant="ghost" className="ml-auto text-critical-ink" onClick={() => setConfirmAbort(true)}>
-              Force stop…
-            </Button>
-          </div>
-          {pending && (
-            <p className="pop-in mt-3 flex items-center gap-1.5 text-xs text-ink-2" role="status">
-              <Spinner className="size-3.5" /> Sent — waiting for the recorder…
-            </p>
-          )}
-          {s.stop_requested && <p className="mt-3 text-xs text-ink-2">Finishing the session after this step…</p>}
-          {error && <div className="mt-3"><ErrorBox>{error}</ErrorBox></div>}
-          <p className="mt-3 text-xs text-muted">
-            “Save” keeps what was recorded so far. The current episode is only written after the reset period, so “discard” works until then.
-          </p>
-        </Card>
-      )}
 
       {/* Result */}
       {!s.active && (
@@ -241,41 +244,15 @@ export function LiveSession({
         </Card>
       )}
 
-      {/* Episode timeline */}
-      {s.episodes.length > 0 && (
-        <Card title="Episodes this session">
-          <ul className="flex flex-wrap gap-2">
-            {s.episodes.map((e, i) => (
-              <li
-                key={i}
-                className="flex items-center gap-2 rounded-full border border-line bg-surface-2/60 px-3 py-1.5 text-sm"
-                title={e.frames != null ? `${e.frames} frames, ${e.duration_s?.toFixed(1)}s, ${e.fps?.toFixed(1)} fps` : undefined}
-              >
-                <StatusIcon
-                  status={e.status === "saved" ? "ok" : e.status === "discarded" ? "fail" : e.status === "saving" ? "info" : "warn"}
-                />
-                <span className="tabular font-medium">#{e.number}</span>
-                <span className="text-xs text-muted">
-                  {e.status === "saved" ? "saved" : e.status === "discarded" ? "discarded" : e.status}
-                  {e.duration_s != null && ` · ${e.duration_s.toFixed(0)}s`}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
-
-      {/* Raw log */}
-      <Card
-        title="Recorder output"
-        actions={
-          <Button size="sm" variant="ghost" onClick={() => setShowLog((v) => !v)} aria-expanded={showLog}>
-            {showLog ? "Hide" : "Show full log"}
-          </Button>
-        }
-      >
-        {showLog ? <LogView log={log} /> : <p className="text-xs text-muted">{log.at(-1)?.text ?? "No output yet"}</p>}
-      </Card>
+      <details className="border-b border-line text-sm" open={showLog} onToggle={(e) => setShowLog(e.currentTarget.open)}>
+        <summary className="flex items-center gap-3 pb-3">
+          <span className="eyebrow">Recorder output</span>
+          {!showLog && <span className="min-w-0 flex-1 truncate text-xs text-muted">{log.at(-1)?.text ?? "No output yet"}</span>}
+        </summary>
+        <div className="pb-3">
+          <LogView log={log} />
+        </div>
+      </details>
 
       <Modal open={confirmAbort} onClose={() => setConfirmAbort(false)} title="Force stop the recorder?">
         <p className="text-sm text-ink-2">
@@ -299,15 +276,11 @@ export function LiveSession({
   );
 }
 
-function Stat({ label, value, sub, status }: { label: string; value: string; sub?: string; status?: "ok" | "warn" }) {
+function Row({ k, v, bad }: { k: string; v: string; bad?: boolean }) {
   return (
-    <div className="rounded-2xl border border-line bg-surface px-4 py-3 shadow-[var(--shadow)]">
-      <div className="text-xs text-muted">{label}</div>
-      <div className="mt-1 flex items-center gap-2">
-        {status && <StatusIcon status={status} />}
-        <span className="tabular text-xl font-semibold">{value}</span>
-        {sub && <span className="text-xs text-muted">{sub}</span>}
-      </div>
+    <div className="flex items-baseline justify-between gap-4 border-t border-line py-2 first:border-t-0">
+      <dt className="eyebrow shrink-0">{k}</dt>
+      <dd className={`tabular min-w-0 truncate ${bad ? "text-critical-ink" : ""}`} title={v}>{v}</dd>
     </div>
   );
 }

@@ -242,6 +242,8 @@ class AgentLink:
         self.system: dict | None = None
         self.system_at = 0.0
         self.procs: dict[str, dict] = {}
+        self.host: dict | None = None  # latest dashboard snapshot the host published
+        self.host_at = 0.0
         self._gen = 0
         self._lock = threading.Lock()
 
@@ -254,7 +256,7 @@ class AgentLink:
                 return
             self._gen += 1
             self.target, self.connected, self.auth_failed = target, False, False
-            self.system, self.procs = None, {}
+            self.system, self.procs, self.host = None, {}, None
             threading.Thread(target=self._run, args=(self._gen, target), daemon=True).start()
 
     def _run(self, gen: int, target: tuple[str, int, str]) -> None:
@@ -288,6 +290,8 @@ class AgentLink:
                     self.procs.pop(name, None)
         elif msg["type"] == "proc":
             self.update_proc(msg["name"], msg["proc"])
+        elif msg["type"] == "host":
+            self.host, self.host_at = msg["data"], time.time()
 
     def update_proc(self, name: str, snap: dict) -> None:
         prev = self.procs.get(name) or {}
@@ -418,6 +422,12 @@ class Controls:
         snap = agent_call(settings.jetson_ip, settings.agent_port, "POST", "/start", body=body)
         self.link.update_proc(name, snap)
         return RemoteProcess(name, title, self.link, settings.jetson_ip, settings.agent_port)
+
+    def host_telemetry(self, settings: Settings) -> dict:
+        """Latest host dashboard snapshot, pushed over the agent link. `age_s` lets the UI flag stale data."""
+        self.link.ensure(settings.jetson_ip, settings.agent_port)
+        live = self.link.connected and self.link.host is not None
+        return {"snapshot": self.link.host if live else None, "age_s": time.time() - self.link.host_at if live else None}
 
     def start_host(self, settings: Settings, cameras: bool) -> RemoteProcess:
         if not read_token():

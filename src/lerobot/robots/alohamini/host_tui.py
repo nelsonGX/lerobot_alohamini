@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -313,3 +315,157 @@ class HostTui:
             f"  {WHITE}{name:<15}{RESET} {bar} {fmt(now)} {YELLOW}{fmt(cmd)}{RESET} {err_txt}  "
             f"{cur_bar} {cur_color}{ma:5.0f}mA{RESET}{hold_txt}"
         )
+
+
+class HostStatusPublisher:
+    """Writes what the dashboard shows as JSON, so the web panel can mirror it when there is no terminal.
+
+    Same inputs as `HostTui.update`; the file is replaced atomically a few times a second.
+    """
+
+    def __init__(self, robot: Any, path: str, *, subtitle: str, rate_hz: float = 5.0):
+        self.robot = robot
+        self.path = path
+        self.subtitle = subtitle
+        self.period_s = 1.0 / rate_hz
+        self.started_at = time.monotonic()
+        self.events: deque[dict[str, Any]] = deque(maxlen=40)
+        self.hz_history: deque[float] = deque(maxlen=40)
+        self._loop_count = 0
+        self._loop_ms_total = 0.0
+        self._avg_loop_ms = 0.0
+        self._window_start = time.perf_counter()
+        self._last_write = 0.0
+        self._handler = _EventCapture(self.events)
+
+    def start(self) -> None:
+        logging.getLogger().addHandler(self._handler)
+
+    def stop(self) -> None:
+        logging.getLogger().removeHandler(self._handler)
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def update(self, *, loop_ms: float, **state: Any) -> None:
+        self._loop_count += 1
+        self._loop_ms_total += loop_ms
+        now = time.perf_counter()
+        if now - self._window_start >= 0.5:
+            self.hz_history.append(round(self._loop_count / (now - self._window_start), 1))
+            self._avg_loop_ms = self._loop_ms_total / self._loop_count
+            self._loop_count, self._loop_ms_total, self._window_start = 0, 0.0, now
+        if now - self._last_write < self.period_s:
+            return
+        self._last_write = now
+        try:
+            self._write(self._snapshot(**state))
+        except Exception as e:  # never let telemetry take the control loop down
+            logging.warning("host status publish failed: %s", e)
+
+    def _write(self, snap: dict[str, Any]) -> None:
+        tmp = f"{self.path}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(snap, f, separators=(",", ":"))
+        os.replace(tmp, self.path)
+
+    def _snapshot(
+        self,
+        *,
+        observation: dict[str, Any],
+        sent_action: dict[str, float],
+        requested_action: dict[str, float],
+        engage_status: dict[str, Any],
+        currents_ma: dict[str, float],
+        last_cmd_age_s: float | None,
+        watchdog_active: bool,
+        watchdog_events: int,
+        target_source: str,
+        owner: str | None,
+    ) -> dict[str, Any]:
+        safety = self.robot.get_safety_status()
+        holds = set(safety["joint_holds"]) | set(safety["gripper_holds"])
+        if watchdog_active:
+            client = "watchdog"
+        elif last_cmd_age_s is None:
+            client = "waiting"
+        elif last_cmd_age_s < 0.25:
+            client = "live"
+        else:
+            client = "idle"
+
+        arms = []
+        for side, bus in (("left", self.robot.left_bus), ("right", self.robot.right_bus)):
+            motors = [m for m in (bus.motors if bus else {}) if m.startswith(f"arm_{side}_")]
+            if not motors:
+                continue
+            st = engage_status.get(side)
+            engaged = st is not None and st.engaged
+            targets = sent_action if engaged else requested_action
+            joints = []
+            for motor in motors:
+                lo, hi = {
+                    MotorNormMode.RANGE_0_100: (0.0, 100.0),
+                    MotorNormMode.DEGREES: (-180.0, 180.0),
+                }.get(bus.motors[motor].norm_mode, (-100.0, 100.0))
+                limits = self.robot._current_limits.get(motor)
+                now_v, cmd_v = observation.get(f"{motor}.pos"), targets.get(f"{motor}.pos")
+                joints.append(
+                    {
+                        "name": motor.split("_", 2)[2],
+                        "now": now_v,
+                        "cmd": cmd_v,
+                        "lo": lo,
+                        "hi": hi,
+                        "ma": abs(currents_ma.get(motor, 0.0)),
+                        "cap_ma": limits.collision_ma if limits else 1000.0,
+                        "hold": motor in holds,
+                    }
+                )
+            arms.append(
+                {
+                    "side": side,
+                    "engaged": engaged,
+                    "worst_joint": st.worst_motor.split("_", 2)[2] if st is not None and st.worst_motor else None,
+                    "worst_error_deg": st.worst_error_deg if st is not None and st.worst_motor else None,
+                    "joints": joints,
+                }
+            )
+
+        has_base = bool(self.robot.base_motors or self.robot.lift.enabled)
+        return {
+            "t": time.time(),
+            "subtitle": self.subtitle,
+            "uptime_s": int(time.monotonic() - self.started_at),
+            "loop_hz": self.hz_history[-1] if self.hz_history else 0.0,
+            "loop_ms": round(self._avg_loop_ms, 1),
+            "hz_history": list(self.hz_history),
+            "client": {"state": client, "age_s": last_cmd_age_s},
+            "source": target_source,
+            "owner": owner,
+            "watchdog_events": watchdog_events,
+            "protection": {"holds": len(holds), "overcurrent_releases": safety.get("arm_fault_events", 0)},
+            "arms": arms,
+            "base": (
+                {
+                    "x": observation.get("x.vel", 0.0),
+                    "y": observation.get("y.vel", 0.0),
+                    "theta": observation.get("theta.vel", 0.0),
+                    "lift_mm": observation.get("lift_axis.height_mm", 0.0),
+                }
+                if has_base
+                else None
+            ),
+            "events": list(self.events),
+        }
+
+
+class _EventCapture(logging.Handler):
+    def __init__(self, sink: deque[dict[str, Any]]):
+        super().__init__(level=logging.INFO)
+        self._sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        level = "error" if record.levelno >= logging.ERROR else "warn" if record.levelno >= logging.WARNING else "info"
+        self._sink.append({"t": time.time(), "level": level, "msg": record.getMessage().splitlines()[0]})

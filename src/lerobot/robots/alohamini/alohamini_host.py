@@ -31,7 +31,7 @@ from .camera_stream import CameraStreamPublisher
 from .command_owner import CommandOwner
 from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
 from .engage_gate import ArmEngageGate
-from .host_tui import HostTui
+from .host_tui import HostStatusPublisher, HostTui
 
 
 class AlohaMiniHost:
@@ -208,6 +208,11 @@ def main():
         help="Disable the live terminal dashboard (it is off automatically when not in a terminal).",
     )
     parser.add_argument(
+        "--status_file",
+        default=None,
+        help="Write the dashboard's live state to this JSON file a few times a second (used by the web panel).",
+    )
+    parser.add_argument(
         "--profile_timing",
         "--profile-timing",
         type=parse_bool,
@@ -307,10 +312,16 @@ def main():
             modes.append("arms only")
         modes.append(f"cameras: {', '.join(robot.cameras) or 'none'}")
         tui = HostTui(robot, subtitle="  ·  ".join(modes))
+    status_pub = None
+    if args.status_file:
+        modes = [args.robot_model, f"cameras: {', '.join(robot.cameras) or 'none'}"]
+        status_pub = HostStatusPublisher(robot, args.status_file, subtitle="  ·  ".join(modes))
 
     try:
         if tui is not None:
             tui.start()
+        if status_pub is not None:
+            status_pub.start()
         # Business logic
         start = time.perf_counter()
         duration = 0
@@ -519,20 +530,23 @@ def main():
                     action_timing_totals_ms[name] = action_timing_totals_ms.get(name, 0.0) + value_ms
                 timing_command_count += 1
 
+            ui_state = {
+                "loop_ms": loop_timings_ms["loop"],
+                "observation": last_observation,
+                "sent_action": last_sent_action,
+                "requested_action": latest_action,
+                "engage_status": engage_gate.status,
+                "currents_ma": tracking_currents_ma,
+                "last_cmd_age_s": (time.monotonic() - last_cmd_time) if has_received_command else None,
+                "watchdog_active": watchdog_active,
+                "watchdog_events": watchdog_events,
+                "target_source": target_source,
+                "owner": command_owner.owner,
+            }
             if tui is not None:
-                tui.update(
-                    loop_ms=loop_timings_ms["loop"],
-                    observation=last_observation,
-                    sent_action=last_sent_action,
-                    requested_action=latest_action,
-                    engage_status=engage_gate.status,
-                    currents_ma=tracking_currents_ma,
-                    last_cmd_age_s=(time.monotonic() - last_cmd_time) if has_received_command else None,
-                    watchdog_active=watchdog_active,
-                    watchdog_events=watchdog_events,
-                    target_source=target_source,
-                    owner=command_owner.owner,
-                )
+                tui.update(**ui_state)
+            if status_pub is not None:
+                status_pub.update(**ui_state)
 
             timing_elapsed_s = loop_done_t - timing_report_start_t
             if args.profile_timing and timing_elapsed_s >= 1.0:
@@ -617,6 +631,8 @@ def main():
     finally:
         if tui is not None:
             tui.stop()
+        if status_pub is not None:
+            status_pub.stop()
         print("Shutting down AlohaMini Host.")
         if camera_stream is not None:
             camera_stream.stop()

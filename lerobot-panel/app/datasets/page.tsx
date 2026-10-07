@@ -57,7 +57,7 @@ export default function DatasetsPage() {
       </div>
       {error && <ErrorBox>{error}</ErrorBox>}
       {data && list.length === 0 && (
-        <div className="rounded-xl border border-dashed border-line p-10 text-center text-sm text-muted">
+        <div className="rounded-lg border border-dashed border-line p-10 text-center text-sm text-muted">
           {data.datasets.length === 0 ? (
             <>
               No datasets yet. <Link href="/" className="text-accent underline">Record your first session</Link>.
@@ -77,7 +77,7 @@ export default function DatasetsPage() {
             <Link
               key={d.repo_id}
               href={`/datasets/view?repo=${encodeURIComponent(d.repo_id)}`}
-              className="group rounded-2xl border border-line bg-surface shadow-[var(--shadow)] p-4 transition hover:-translate-y-0.5 hover:border-accent hover:shadow-md active:translate-y-0"
+              className="group rounded-lg border border-line bg-surface p-4 transition hover:-translate-y-0.5 hover:border-accent hover:shadow-md active:translate-y-0"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">

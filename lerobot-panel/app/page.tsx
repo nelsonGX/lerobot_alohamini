@@ -97,8 +97,10 @@ function Record() {
     datasets.refresh();
   };
 
+  const live = !!showSession;
+
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+    <div className={`grid gap-6 ${live ? "" : "lg:grid-cols-[minmax(0,1fr)_320px]"}`}>
       <div className="min-w-0">
         {backendError && (
           <div className="mb-4">
@@ -129,18 +131,39 @@ function Record() {
           />
         )}
       </div>
-      <aside className="grid content-start gap-4">
-        <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
-        <HistoryCard history={history.data} />
-        <HowTo />
-      </aside>
+      {live ? (
+        // Mid-session the operator needs the controls, not setup: checks and history fold away.
+        <div className="grid gap-x-8 md:grid-cols-2">
+          <details className="border-b border-line text-sm">
+            <summary className="py-2.5 font-medium">
+              Pre-flight checks{" "}
+              <span className={blocked ? "text-critical-ink" : "text-good-ink"}>{blocked ? "— problems" : "— all good"}</span>
+            </summary>
+            <div className="pb-3">
+              <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
+            </div>
+          </details>
+          <details className="border-b border-line text-sm">
+            <summary className="py-2.5 font-medium">Recent sessions</summary>
+            <div className="pb-3">
+              <HistoryCard history={history.data} />
+            </div>
+          </details>
+        </div>
+      ) : (
+        <aside className="grid content-start gap-4">
+          <Preflight checks={preflight.data?.checks ?? null} onRefresh={recheck} loading={checking} />
+          <HistoryCard history={history.data} />
+          <HowTo />
+        </aside>
+      )}
     </div>
   );
 }
 
 function HowTo() {
   return (
-    <details className="rounded-2xl border border-line bg-surface px-5 py-3.5 text-sm shadow-[var(--shadow)]">
+    <details className="rounded-lg border border-line px-4 py-3 text-sm">
       <summary className="cursor-pointer font-semibold">How recording works</summary>
       <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-ink-2">
         <li>

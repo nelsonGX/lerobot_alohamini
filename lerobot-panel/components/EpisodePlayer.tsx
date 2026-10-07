@@ -166,7 +166,7 @@ export function EpisodePlayer({ repo, episode, fps, cameras }: {
             const seg = episode.videos[cam];
             const hidden = focus && focus !== cam;
             return (
-              <figure key={cam} className={`overflow-hidden rounded-xl border border-line bg-black ${hidden ? "hidden" : ""}`}>
+              <figure key={cam} className={`overflow-hidden rounded-lg border border-line bg-black ${hidden ? "hidden" : ""}`}>
                 {videoErrors[cam] ? (
                   <div className="flex aspect-video items-center justify-center p-6 text-center text-sm text-white/80">
                     This browser cannot play the video (LeRobot encodes AV1). Try Chrome, Edge or Firefox.
@@ -199,13 +199,13 @@ export function EpisodePlayer({ repo, episode, fps, cameras }: {
           })}
         </div>
       ) : (
-        <div className="rounded-xl border border-dashed border-line p-4 text-sm text-muted">
+        <div className="rounded-lg border border-dashed border-line p-4 text-sm text-muted">
           This dataset has no camera streams (the host may have run with <code>--no_cameras</code>). Joint data is shown below.
         </div>
       )}
 
       {/* Transport */}
-      <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-surface shadow-[var(--shadow)] px-3 py-2">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface px-3 py-2">
         <button
           onClick={() => {
             if (!playing && t >= duration - 1 / fps) seek(0);

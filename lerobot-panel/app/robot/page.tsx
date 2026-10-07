@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { HostMonitor } from "@/components/HostMonitor";
 import { ProcConsole, ProcStatus, useProc } from "@/components/Console";
 import { Button, Card, ErrorBox, Field, inputClass, LinkButton, Spinner, StatusIcon, Toggle, type Status } from "@/components/ui";
 import { api, type JetsonStatus } from "@/lib/api";
@@ -72,6 +73,8 @@ export default function RobotPage() {
 
       {error && <ErrorBox>{error}</ErrorBox>}
       {robot.error && <ErrorBox>Cannot reach the panel backend: {robot.error}</ErrorBox>}
+
+      {(j?.host_listening || hostRunning) && <HostMonitor />}
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Jetson + host */}
@@ -207,7 +210,7 @@ export default function RobotPage() {
             </Card>
           </section>
 
-          <div className="flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface shadow-[var(--shadow)] px-4 py-3 text-sm text-ink-2">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface px-4 py-3 text-sm text-ink-2">
             Robot ready? Head over and start a session.
             <LinkButton href="/" variant="primary" size="sm">Go to Record →</LinkButton>
           </div>
@@ -219,7 +222,7 @@ export default function RobotPage() {
 
 function Step({ n, title, status, detail }: { n: number; title: string; status: Status; detail: ReactNode }) {
   return (
-    <li className="flex gap-3 rounded-2xl border border-line bg-surface shadow-[var(--shadow)] p-3">
+    <li className="flex gap-3 rounded-lg border border-line bg-surface p-3">
       <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-surface-2 text-xs font-semibold text-ink-2">{n}</span>
       <div className="min-w-0">
         <div className="flex items-center gap-1.5 text-sm font-medium">

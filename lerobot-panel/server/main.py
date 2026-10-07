@@ -150,6 +150,12 @@ def robot_state() -> dict:
             "recording": recorder.recording_dataset()}  # fmt: skip
 
 
+@app.get("/api/host/telemetry")
+def host_telemetry() -> dict:
+    """What the host's terminal dashboard shows (arm positions, currents, link state), streamed from the Jetson agent."""
+    return controls.host_telemetry(load_settings())
+
+
 class JetsonSetupRequest(BaseModel):
     token: str = Field(min_length=8, max_length=200, pattern=r"^\S+$")
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 import secrets
 import shlex
@@ -27,6 +28,7 @@ from procs import HOST_MODULE, ConsoleProcess
 TOKEN_FILE = DATA_DIR / "agent_token"
 CALIBRATE_MODULE = "lerobot.robots.alohamini.alohamini_calibrate"
 BOOT = time.time()
+HOST_STATUS_FILE = "/tmp/alohamini_host_status.json"  # written by the host (--status_file), ~5 Hz
 
 
 def load_token() -> str:
@@ -152,6 +154,19 @@ def status() -> dict:
     }
 
 
+def _host_snapshot() -> dict | None:
+    """The host's live dashboard state, or None when it isn't publishing."""
+    try:
+        return json.loads(Path(HOST_STATUS_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+@app.get("/host/status", dependencies=[Depends(auth)])
+def host_status() -> dict:
+    return {"snapshot": _host_snapshot()}
+
+
 # ---------- programs ----------
 
 
@@ -168,7 +183,7 @@ def start(req: StartRequest) -> dict:
         raise HTTPException(409, "The robot host or a calibration is already running on the Jetson.")
     model = shlex.quote(req.robot_model)
     if req.name == "host":
-        args = f"--robot_model {model} {req.host_args}" + ("" if req.cameras else " --no_cameras")
+        args = f"--robot_model {model} {req.host_args} --status_file {HOST_STATUS_FILE}" + ("" if req.cameras else " --no_cameras")
         # Piping through cat makes stdout a pipe, so the host prints plain logs instead of its full-screen dashboard.
         script = f"uv run python -m {HOST_MODULE} {args} 2>&1 | cat"
     else:
@@ -238,8 +253,16 @@ async def stream(sock: WebSocket) -> None:
     sent: dict[str, tuple] = {}
     versions: dict[str, int] = {}
     last_status = 0.0
+    host_mtime = 0.0
     try:
         while True:
+            try:
+                mtime = os.stat(HOST_STATUS_FILE).st_mtime
+            except OSError:
+                mtime = 0.0
+            if mtime != host_mtime:
+                host_mtime = mtime
+                await sock.send_json({"type": "host", "data": _host_snapshot() if mtime else None})
             for name, p in procs.items():
                 if p is None:
                     continue
