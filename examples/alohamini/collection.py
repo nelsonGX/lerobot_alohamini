@@ -169,6 +169,33 @@ def load_config(path: str | os.PathLike | None = None) -> CollectionConfig:
     )
 
 
+def save_plan(items: list[dict], path: str | os.PathLike | None = None) -> CollectionConfig:
+    """Edit each object's name/colour and its task's sentence/target (matched by object id); other settings stay.
+
+    The file is validated before it replaces the old one. (YAML comments are not preserved.)
+    """
+    path = Path(path or os.environ.get("COLLECTION_CONFIG") or DEFAULT_CONFIG_PATH)
+    raw = yaml.safe_load(path.read_text())
+    by_id = {str(i.get("id")): i for i in items}
+    if set(by_id) != {o["id"] for o in raw["objects"]}:
+        raise ConfigError("The list of objects does not match the plan")
+    for o in raw["objects"]:
+        o["name"], o["color"] = str(by_id[o["id"]]["name"]).strip(), str(by_id[o["id"]]["color"])
+    for t in raw["tasks"]:
+        item = by_id[t["object"]]
+        t["text"], t["target"] = str(item["task_text"]).strip(), int(item["target"])
+    header = "# Data-collection plan. Edited from the panel's Settings; see RECORDING.md for what each field does.\n"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(header + yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    try:
+        load_config(tmp)
+    except ConfigError:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(path)
+    return load_config(path)
+
+
 # ---------------------------------------------------------------- counts and suggestion
 
 

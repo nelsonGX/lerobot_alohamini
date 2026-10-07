@@ -175,3 +175,24 @@ def test_dataset_lock_is_exclusive(tmp_path):
     with col.dataset_lock(root):
         assert lock.read_text() == str(os.getpid())
     assert not lock.exists()
+
+
+def test_save_plan_edits_objects_and_tasks_and_rejects_bad_input(tmp_path):
+    import shutil
+
+    path = tmp_path / "c.yaml"
+    shutil.copy(col.DEFAULT_CONFIG_PATH, path)
+    cfg = col.load_config(path)
+    items = [
+        {"id": o.id, "name": o.name, "color": o.color, "task_text": next(t.text for t in cfg.tasks if t.object == o.id), "target": 50}
+        for o in cfg.objects
+    ]
+    items[0].update(name="yellow duck", color="#ffcc00", task_text="pick up the yellow duck", target=30)
+    new = col.save_plan(items, path)
+    assert new.objects[0].name == "yellow duck" and new.objects[0].color == "#ffcc00"
+    assert next(t for t in new.tasks if t.object == items[0]["id"]).text == "pick up the yellow duck"
+    assert new.dataset == cfg.dataset and new.quality == cfg.quality  # everything else is kept
+    items[1]["task_text"] = items[0]["task_text"]  # duplicate sentence
+    with pytest.raises(col.ConfigError):
+        col.save_plan(items, path)
+    assert col.load_config(path).objects[0].name == "yellow duck"  # a rejected edit leaves the file alone

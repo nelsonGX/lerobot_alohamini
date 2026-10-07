@@ -199,6 +199,25 @@ def collection_state() -> dict:
     }
 
 
+class PlanItem(BaseModel):
+    id: str = Field(max_length=64)
+    name: str = Field(min_length=1, max_length=40)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    task_text: str = Field(min_length=3, max_length=200)
+    target: int = Field(ge=1, le=10000)
+
+
+@app.put("/api/collection/plan")
+def save_plan(items: list[PlanItem]) -> dict:
+    if recorder.recording_dataset():
+        raise HTTPException(409, "A session is running. Finish it before editing the objects and tasks.")
+    try:
+        collection.save_plan([i.model_dump() for i in items])
+    except collection.ConfigError as e:
+        raise HTTPException(400, str(e)) from e
+    return collection_state()
+
+
 class UploadRequest(BaseModel):
     method: str = Field(pattern="^(hub|rsync)$")
     dry_run: bool = False
