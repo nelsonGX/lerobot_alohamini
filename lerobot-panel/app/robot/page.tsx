@@ -13,6 +13,7 @@ export default function RobotPage() {
   const settings = usePoll(api.settings, 10000);
   const host = useProc("host");
   const teleop = useProc("teleop");
+  const restore = useProc("restore");
   const calibrate = useProc("calibrate");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -163,9 +164,21 @@ export default function RobotPage() {
                   Start teleoperation
                 </Button>
               )}
+              <Button
+                disabled={!!recording || !j?.host_listening || teleop.proc?.state === "running" || restore.proc?.state === "running"}
+                loading={busy === "restore" || restore.proc?.state === "running"}
+                loadingText="Matching…"
+                title="Slowly move the follower arms to where the leader arms are now"
+                onClick={() => run("restore", api.restoreStart, restore.refresh)}
+              >
+                Match follower to leader
+              </Button>
               {!j?.host_listening && <span className="self-center text-xs text-muted">Start the robot host first.</span>}
               {recording && <span className="self-center text-xs text-muted">A recording is running.</span>}
             </div>
+            {restore.proc && (
+              <div className="mt-4"><ProcConsole name="restore" proc={restore.proc} lines={restore.lines} onChange={restore.refresh} /></div>
+            )}
             {teleop.proc && (
               <div className="mt-4"><ProcConsole name="teleop" proc={teleop.proc} lines={teleop.lines} onChange={teleop.refresh} /></div>
             )}

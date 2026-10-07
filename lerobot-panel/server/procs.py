@@ -2,6 +2,7 @@
 
 - host:      the robot host on the Jetson (through the panel agent, ./agent there), what ./host does
 - teleop:    teleoperation without recording, what ./client does
+- restore:   moves the follower arms to the leader's current pose, then exits
 - calibrate: leader arm calibration here (./lcalibrate) or follower calibration on the Jetson (./fcalibrate)
 
 Each runs in a pseudo-terminal; its screen is kept in a TermBuffer and interactive
@@ -350,7 +351,7 @@ class RemoteProcess:
 class Controls:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.procs: dict[str, ConsoleProcess | RemoteProcess | None] = {"host": None, "teleop": None, "calibrate": None}
+        self.procs: dict[str, ConsoleProcess | RemoteProcess | None] = {"host": None, "teleop": None, "restore": None, "calibrate": None}
         self.calibrate_target: str | None = None  # leader | follower
         self.link = AgentLink()
 
@@ -363,13 +364,15 @@ class Controls:
         users = []
         if self._running("teleop"):
             users.append("Teleoperation")
+        if self._running("restore"):
+            users.append("Match follower to leader")
         if self._running("calibrate") and self.calibrate_target == "leader":
             users.append("Leader calibration")
         return users
 
     def leader_pids(self) -> set[int]:
         pids: set[int] = set()
-        for name in ("teleop", "calibrate"):
+        for name in ("teleop", "restore", "calibrate"):
             if p := self._running(name):
                 pids |= p.pids()
         return pids
@@ -462,11 +465,26 @@ class Controls:
         ]  # fmt: skip
         return self._start("teleop", lambda: ConsoleProcess("teleop", "Teleoperation", cmd))
 
+    def start_restore(self, settings: Settings, recorder_active: bool) -> ConsoleProcess:
+        """Move the follower arms to the leader's current pose (a short-lived program)."""
+        if recorder_active:
+            raise ProcBusy("A recording is running; it already teleoperates the robot.")
+        if users := [u for u in self.leader_users() if u != "Match follower to leader"]:
+            raise ProcBusy(f"{users[0]} is using the leader arms.")
+        cmd = [
+            PYTHON, str(REPO_ROOT / "examples" / "alohamini" / "restore_bi.py"),
+            "--robot.remote_ip", settings.jetson_ip,
+            "--robot.robot_model", settings.robot_model,
+            "--teleop.id", settings.teleop_id,
+            "--teleop.arm_profile", settings.arm_profile,
+        ]  # fmt: skip
+        return self._start("restore", lambda: ConsoleProcess("restore", "Match follower to leader", cmd))
+
     def start_calibration(self, settings: Settings, target: str, recorder_active: bool) -> ConsoleProcess | RemoteProcess:
         if self._running("calibrate"):
             raise ProcBusy("A calibration is already running.")
         if target == "leader":
-            if recorder_active or self._running("teleop"):
+            if recorder_active or self._running("teleop") or self._running("restore"):
                 raise ProcBusy("Stop the recording/teleoperation first: they are using the leader arms.")
             cmd = [
                 PYTHON, str(REPO_ROOT / "examples" / "alohamini" / "calibrate_bi.py"),

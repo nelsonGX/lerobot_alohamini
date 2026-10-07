@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
+import { QuickActions } from "./QuickActions";
 import { SettingsDialog } from "./SettingsDialog";
 import { PHASE_META } from "./phase";
 
@@ -70,6 +71,7 @@ export function Nav() {
               <span className="size-2 rounded-full border border-muted" /> Idle
             </span>
           )}
+          <QuickActions />
           <button
             onClick={() => setSettingsOpen(true)}
             className="rounded-md p-2 text-ink-2 hover:bg-surface-2 hover:text-ink"

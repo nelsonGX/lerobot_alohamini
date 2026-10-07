@@ -239,6 +239,15 @@ def teleop_start() -> dict:
     return {"ok": True}
 
 
+@app.post("/api/restore/start")
+def restore_start() -> dict:
+    try:
+        controls.start_restore(load_settings(), recorder_active=recorder.recording_dataset() is not None)
+    except (RuntimeError, OSError) as e:
+        raise _proc_error(e) from e
+    return {"ok": True}
+
+
 class CalibrateRequest(BaseModel):
     target: str = Field(pattern="^(leader|follower)$")
 
