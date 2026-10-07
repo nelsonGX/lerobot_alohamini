@@ -23,7 +23,7 @@ export function Nav() {
     return (
       <Link
         href={href}
-        className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${on ? "bg-surface-2 text-ink" : "text-ink-2 hover:text-ink"}`}
+        className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition ${on ? "bg-accent/15 text-accent" : "text-ink-2 hover:bg-surface-2 hover:text-ink"}`}
       >
         {label}
       </Link>
@@ -31,11 +31,12 @@ export function Nav() {
   };
 
   return (
-    <header className="sticky top-0 z-20 border-b border-line bg-surface/90 backdrop-blur">
+    <header className="sticky top-0 z-20 border-b border-line/70 bg-surface/75 backdrop-blur-xl">
       <div className="mx-auto flex h-14 max-w-7xl items-center gap-2 px-4">
         <Link href="/" className="mr-3 flex items-center gap-2 font-semibold">
           <svg viewBox="0 0 24 24" className="size-6" aria-hidden>
-            <rect x="2" y="2" width="20" height="20" rx="6" fill="var(--accent)" />
+            <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="var(--accent)" /><stop offset="1" stopColor="var(--accent-2)" /></linearGradient></defs>
+            <rect x="2" y="2" width="20" height="20" rx="7" fill="url(#lg)" />
             <path d="M7 16V9.5a2.5 2.5 0 0 1 5 0V16m0-4h0a2.5 2.5 0 0 1 5 0V16" stroke="white" strokeWidth="1.8" fill="none" strokeLinecap="round" />
           </svg>
           <span className="hidden sm:inline">AlohaMini Panel</span>
@@ -61,7 +62,7 @@ export function Nav() {
           ) : active && meta ? (
             <Link
               href="/"
-              className="flex items-center gap-2 rounded-full border border-line px-3 py-1 text-xs font-medium"
+              className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-medium shadow-sm"
               title={`${s.operator || "Someone"} is recording ${s.dataset}`}
             >
               <span className={`size-2 rounded-full ${s.phase === "recording" ? "pulse-dot" : ""}`} style={{ background: meta.color }} />

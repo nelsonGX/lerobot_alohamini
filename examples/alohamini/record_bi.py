@@ -438,7 +438,8 @@ def main():
     # === Clean up ===
     robot.disconnect()
     leader_arm.disconnect()
-    keyboard.disconnect()
+    if keyboard.is_connected:
+        keyboard.disconnect()
     if listener is not None:
         listener.stop()
     print("Saving dataset...", flush=True)

@@ -191,7 +191,7 @@ function DatasetView() {
         </Card>
       ) : (
         <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
-          <aside className="flex max-h-[calc(100vh-120px)] flex-col overflow-hidden rounded-xl border border-line bg-surface lg:sticky lg:top-20">
+          <aside className="flex max-h-[calc(100vh-120px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[var(--shadow)] lg:sticky lg:top-20">
             <div className="flex items-center justify-between border-b border-line px-3 py-2 text-xs text-muted">
               <span>{episodes.length} episodes</span>
               {selected.size > 0 ? (
@@ -291,7 +291,7 @@ function DatasetView() {
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="min-w-0 rounded-xl border border-line bg-surface px-4 py-3">
+    <div className="min-w-0 rounded-2xl border border-line bg-surface shadow-[var(--shadow)] px-4 py-3">
       <div className="text-xs text-muted">{label}</div>
       <div className="tabular mt-0.5 text-lg font-semibold">{value}</div>
       {sub && <div className="truncate text-xs text-muted capitalize">{sub}</div>}

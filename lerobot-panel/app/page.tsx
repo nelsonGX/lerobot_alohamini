@@ -140,7 +140,7 @@ function Record() {
 
 function HowTo() {
   return (
-    <details className="rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+    <details className="rounded-2xl border border-line bg-surface px-5 py-3.5 text-sm shadow-[var(--shadow)]">
       <summary className="cursor-pointer font-semibold">How recording works</summary>
       <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-ink-2">
         <li>

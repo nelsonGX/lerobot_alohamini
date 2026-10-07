@@ -18,17 +18,17 @@ type Variant = "primary" | "secondary" | "danger" | "ghost" | "good" | "warn";
 type Size = "sm" | "md" | "lg";
 
 const variants: Record<Variant, string> = {
-  primary: "bg-accent text-accent-ink border-transparent shadow-sm hover:brightness-110 active:brightness-95",
-  secondary: "bg-surface text-ink border-line shadow-sm hover:border-ink-2/40 hover:bg-surface-2 active:bg-surface-2",
-  danger: "bg-critical text-white border-transparent shadow-sm hover:brightness-110 active:brightness-95",
-  good: "bg-good text-white border-transparent shadow-sm hover:brightness-110 active:brightness-95",
-  warn: "bg-warn text-black border-transparent shadow-sm hover:brightness-105 active:brightness-95",
+  primary: "bg-gradient-to-br from-accent to-accent/80 text-accent-ink border-transparent shadow-md shadow-accent/25 hover:brightness-110 active:brightness-95",
+  secondary: "bg-surface text-ink border-line shadow-sm hover:border-accent/50 hover:bg-surface-2 active:bg-surface-2",
+  danger: "bg-gradient-to-br from-critical to-critical/80 text-white border-transparent shadow-md shadow-critical/25 hover:brightness-110 active:brightness-95",
+  good: "bg-gradient-to-br from-good to-good/80 text-white border-transparent shadow-md shadow-good/25 hover:brightness-105 active:brightness-95",
+  warn: "bg-gradient-to-br from-warn to-warn/85 text-[#3a2500] border-transparent shadow-md shadow-warn/25 hover:brightness-105 active:brightness-95",
   ghost: "bg-transparent text-ink-2 border-transparent hover:bg-surface-2 hover:text-ink active:bg-surface-2",
 };
 const sizes: Record<Size, string> = { sm: "h-8 px-3 text-sm", md: "h-10 px-4 text-sm", lg: "h-14 px-5 text-base" };
 
 const buttonBase =
-  "relative inline-flex select-none items-center justify-center gap-2 whitespace-nowrap rounded-lg border font-medium " +
+  "relative inline-flex select-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border font-semibold " +
   "transition-[background-color,border-color,color,filter,transform,opacity] duration-150 " +
   "enabled:active:translate-y-px focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent " +
   "disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none";
@@ -113,14 +113,14 @@ export function Card({ title, actions, children, className = "" }: {
   className?: string;
 }) {
   return (
-    <section className={`rounded-xl border border-line bg-surface ${className}`}>
+    <section className={`rounded-2xl border border-line bg-surface shadow-[var(--shadow)] ${className}`}>
       {(title || actions) && (
-        <header className="flex min-h-12 items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+        <header className="flex min-h-12 items-center justify-between gap-3 border-b border-line/70 px-5 py-2.5">
           <h2 className="text-sm font-semibold">{title}</h2>
           {actions}
         </header>
       )}
-      <div className="p-4">{children}</div>
+      <div className="p-5">{children}</div>
     </section>
   );
 }
@@ -149,7 +149,7 @@ export function StatusIcon({ status, className = "" }: { status: Status; classNa
     return (
       <svg viewBox="0 0 16 16" className={common} aria-label="Warning">
         <path d="M8 1.5 15 14H1z" fill="var(--warn)" />
-        <path d="M8 6v3.5M8 11.6v.1" stroke="black" strokeWidth="1.7" strokeLinecap="round" />
+        <path d="M8 6v3.5M8 11.6v.1" stroke="#3a2500" strokeWidth="1.7" strokeLinecap="round" />
       </svg>
     );
   if (status === "fail")
@@ -624,7 +624,7 @@ export function Modal({ open, onClose, title, children }: {
       ref={ref}
       onClose={onClose}
       onClick={(e) => e.target === ref.current && onClose()}
-      className="m-auto w-[min(520px,calc(100vw-32px))] rounded-xl border border-line bg-surface p-0 text-ink shadow-2xl backdrop:bg-black/50"
+      className="m-auto w-[min(520px,calc(100vw-32px))] rounded-3xl border border-line bg-surface p-0 text-ink shadow-2xl backdrop:bg-black/50"
     >
       <div className="flex items-center justify-between gap-3 border-b border-line py-2 pr-2 pl-5">
         <span className="font-semibold">{title}</span>

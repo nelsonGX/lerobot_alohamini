@@ -102,14 +102,16 @@ export function LiveSession({
   return (
     <div className="grid gap-4">
       {/* Phase banner */}
-      <section className="overflow-hidden rounded-xl border border-line bg-surface">
-        <div className="h-1.5" style={{ background: meta.color }} />
+      <section
+        className="overflow-hidden rounded-3xl border border-line shadow-[var(--shadow)]"
+        style={{ background: `linear-gradient(135deg, color-mix(in srgb, ${meta.color} 16%, var(--surface)), var(--surface) 65%)` }}
+      >
         <div className="grid gap-6 p-5 md:grid-cols-[1fr_auto]">
           <div className="min-w-0">
             <div className="flex items-center gap-3">
               <span
                 className={`size-3.5 rounded-full ${s.phase === "recording" ? "pulse-dot" : ""}`}
-                style={{ background: meta.color }}
+                style={{ background: meta.color, boxShadow: `0 0 0 5px color-mix(in srgb, ${meta.color} 25%, transparent)` }}
                 aria-hidden
               />
               <span className="text-2xl font-semibold tracking-tight">{meta.label}</span>
@@ -135,7 +137,7 @@ export function LiveSession({
           </div>
         </div>
         {progress != null && (
-          <div className="mx-5 mb-5 h-2 overflow-hidden rounded-full bg-surface-2">
+          <div className="mx-5 mb-5 h-2.5 overflow-hidden rounded-full bg-surface-2">
             <div className="h-full rounded-full transition-[width] duration-500 ease-linear" style={{ width: `${progress * 100}%`, background: meta.color }} />
           </div>
         )}
@@ -246,7 +248,7 @@ export function LiveSession({
             {s.episodes.map((e, i) => (
               <li
                 key={i}
-                className="flex items-center gap-2 rounded-lg border border-line px-2.5 py-1.5 text-sm"
+                className="flex items-center gap-2 rounded-full border border-line bg-surface-2/60 px-3 py-1.5 text-sm"
                 title={e.frames != null ? `${e.frames} frames, ${e.duration_s?.toFixed(1)}s, ${e.fps?.toFixed(1)} fps` : undefined}
               >
                 <StatusIcon
@@ -299,7 +301,7 @@ export function LiveSession({
 
 function Stat({ label, value, sub, status }: { label: string; value: string; sub?: string; status?: "ok" | "warn" }) {
   return (
-    <div className="rounded-xl border border-line bg-surface px-4 py-3">
+    <div className="rounded-2xl border border-line bg-surface px-4 py-3 shadow-[var(--shadow)]">
       <div className="text-xs text-muted">{label}</div>
       <div className="mt-1 flex items-center gap-2">
         {status && <StatusIcon status={status} />}

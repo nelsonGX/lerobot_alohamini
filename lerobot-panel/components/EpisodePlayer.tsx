@@ -205,7 +205,7 @@ export function EpisodePlayer({ repo, episode, fps, cameras }: {
       )}
 
       {/* Transport */}
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2">
+      <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-surface shadow-[var(--shadow)] px-3 py-2">
         <button
           onClick={() => {
             if (!playing && t >= duration - 1 / fps) seek(0);

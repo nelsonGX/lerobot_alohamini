@@ -77,7 +77,7 @@ export default function DatasetsPage() {
             <Link
               key={d.repo_id}
               href={`/datasets/view?repo=${encodeURIComponent(d.repo_id)}`}
-              className="group rounded-xl border border-line bg-surface p-4 transition hover:-translate-y-0.5 hover:border-accent hover:shadow-md active:translate-y-0"
+              className="group rounded-2xl border border-line bg-surface shadow-[var(--shadow)] p-4 transition hover:-translate-y-0.5 hover:border-accent hover:shadow-md active:translate-y-0"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
