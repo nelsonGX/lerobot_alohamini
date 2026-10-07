@@ -21,28 +21,30 @@ from ..config import RobotConfig
 
 
 def alohamini_cameras_config() -> dict[str, CameraConfig]:
+    # USB port paths keep each view stable when /dev/video indices change.
     return {
         "forward": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_forward",
+            index_or_path="/dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0",
             fps=30,
             width=640,
             height=480,
+            fourcc="MJPG",
             rotation=Cv2Rotation.NO_ROTATION,
         ),
-        # "backward": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_backward", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "chest": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_chest", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "wrist_left": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_wrist_left", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        "wrist_right": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_wrist_right",
+        "chest": OpenCVCameraConfig(
+            index_or_path="/dev/v4l/by-path/platform-3610000.usb-usb-0:2.3.1:1.0-video-index0",
+            fps=25,
+            width=640,
+            height=480,
+            fourcc="MJPG",
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
+        "overhead": OpenCVCameraConfig(
+            index_or_path="/dev/v4l/by-path/platform-3610000.usb-usb-0:2.3.2:1.0-video-index0",
             fps=30,
             width=640,
             height=480,
+            fourcc="MJPG",
             rotation=Cv2Rotation.NO_ROTATION,
         ),
     }
@@ -102,7 +104,7 @@ class AlohaMiniHostConfig:
     observation_request_window: int = 3
 
     # The dedicated ROS camera stream is opt-in so the original AlohaMini Host
-    # keeps its ports, CPU use, and two-camera behavior unless explicitly enabled.
+    # keeps its ports and avoids extra JPEG encoding unless explicitly enabled.
     camera_stream_enabled: bool = False
     camera_stream_jpeg_quality: int = 70
     camera_stream_max_age_ms: int = 500
