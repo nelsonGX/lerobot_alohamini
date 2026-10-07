@@ -1,12 +1,11 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api, type Phase, type Session } from "@/lib/api";
 import { fmtDuration, fmtTime } from "@/lib/format";
 import { useLocalStorage } from "@/lib/hooks";
 import { PHASE_META } from "./phase";
-import { Button, Card, ErrorBox, Kbd, Modal, StatusIcon } from "./ui";
+import { Button, Card, ErrorBox, Kbd, LinkButton, Modal, Spinner, StatusIcon, Toggle } from "./ui";
 
 type Action = "next" | "rerecord" | "stop" | "discard_stop" | "abort";
 
@@ -160,26 +159,24 @@ export function LiveSession({
         <Card
           title="Controls"
           actions={
-            <label className="flex items-center gap-2 text-xs text-ink-2">
-              <input type="checkbox" checked={voice} onChange={(e) => setVoice(e.target.checked)} /> Voice cues
-            </label>
+            <Toggle size="sm" checked={voice} onChange={setVoice} label="Voice cues" />
           }
         >
           {s.phase === "recording" ? (
             <div className="grid gap-3 sm:grid-cols-2">
-              <Button variant="good" size="lg" disabled={!!pending} onClick={() => send("next")}>
+              <Button variant="good" size="lg" disabled={!!pending} loading={pending === "next"} onClick={() => send("next")}>
                 Episode done — save it <Kbd>N</Kbd>
               </Button>
-              <Button variant="warn" size="lg" disabled={!!pending} onClick={() => send("rerecord")}>
+              <Button variant="warn" size="lg" disabled={!!pending} loading={pending === "rerecord"} onClick={() => send("rerecord")}>
                 Mistake — discard &amp; redo <Kbd>R</Kbd>
               </Button>
             </div>
           ) : s.phase === "resetting" ? (
             <div className="grid gap-3 sm:grid-cols-2">
-              <Button variant="primary" size="lg" disabled={!!pending} onClick={() => send("next")}>
+              <Button variant="primary" size="lg" disabled={!!pending} loading={pending === "next"} onClick={() => send("next")}>
                 Scene is reset — start next <Kbd>N</Kbd>
               </Button>
-              <Button variant="warn" size="lg" disabled={!!pending} onClick={() => send("rerecord")}>
+              <Button variant="warn" size="lg" disabled={!!pending} loading={pending === "rerecord"} onClick={() => send("rerecord")}>
                 Discard episode {s.episode} &amp; redo <Kbd>R</Kbd>
               </Button>
             </div>
@@ -187,17 +184,21 @@ export function LiveSession({
             <p className="text-sm text-muted">{meta.description} Controls unlock when recording or resetting.</p>
           )}
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
-            <Button size="sm" disabled={!controllable || !!pending} onClick={() => send("stop")}>
+            <Button size="sm" disabled={!controllable || !!pending} loading={pending === "stop"} onClick={() => send("stop")}>
               Save &amp; finish session <Kbd>Q</Kbd>
             </Button>
-            <Button size="sm" disabled={!controllable || !!pending} onClick={() => send("discard_stop")}>
+            <Button size="sm" disabled={!controllable || !!pending} loading={pending === "discard_stop"} onClick={() => send("discard_stop")}>
               Discard current &amp; finish
             </Button>
             <Button size="sm" variant="ghost" className="ml-auto text-critical-ink" onClick={() => setConfirmAbort(true)}>
               Force stop…
             </Button>
           </div>
-          {pending && <p className="mt-3 text-xs text-muted">Sent — waiting for the recorder…</p>}
+          {pending && (
+            <p className="pop-in mt-3 flex items-center gap-1.5 text-xs text-ink-2" role="status">
+              <Spinner className="size-3.5" /> Sent — waiting for the recorder…
+            </p>
+          )}
           {s.stop_requested && <p className="mt-3 text-xs text-ink-2">Finishing the session after this step…</p>}
           {error && <div className="mt-3"><ErrorBox>{error}</ErrorBox></div>}
           <p className="mt-3 text-xs text-muted">
@@ -216,9 +217,9 @@ export function LiveSession({
                 <div className="font-semibold">Saved {s.saved_count} episode{s.saved_count === 1 ? "" : "s"} to {s.dataset}</div>
                 <div className="truncate text-xs text-muted">{s.dataset_path}</div>
               </div>
-              <Link href={`/datasets/view?repo=${encodeURIComponent(s.dataset)}`}>
-                <Button variant="primary">Review episodes</Button>
-              </Link>
+              <LinkButton variant="primary" href={`/datasets/view?repo=${encodeURIComponent(s.dataset)}`}>
+                Review episodes
+              </LinkButton>
               <Button onClick={onRecordMore}>Record more</Button>
               <Button variant="ghost" onClick={onNewSession}>New session</Button>
             </div>
@@ -266,8 +267,8 @@ export function LiveSession({
       <Card
         title="Recorder output"
         actions={
-          <Button size="sm" variant="ghost" onClick={() => setShowLog((v) => !v)}>
-            {showLog ? "Hide" : "Show"}
+          <Button size="sm" variant="ghost" onClick={() => setShowLog((v) => !v)} aria-expanded={showLog}>
+            {showLog ? "Hide" : "Show full log"}
           </Button>
         }
       >

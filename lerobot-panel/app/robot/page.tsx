@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { useState, type ReactNode } from "react";
 import { ProcConsole, ProcStatus, useProc } from "@/components/Console";
-import { Button, Card, ErrorBox, Field, inputClass, StatusIcon, type Status } from "@/components/ui";
+import { Button, Card, ErrorBox, Field, inputClass, LinkButton, Spinner, StatusIcon, Toggle, type Status } from "@/components/ui";
 import { api, type JetsonStatus } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
 
@@ -90,7 +89,9 @@ export default function RobotPage() {
               {j?.host_listening || hostRunning ? (
                 <Button
                   variant="danger"
-                  disabled={busy === "host" || host.proc?.state === "stopping" || !!recording}
+                  disabled={!!recording}
+                  loading={busy === "host" || host.proc?.state === "stopping"}
+                  loadingText="Stopping…"
                   title={recording ? "Stop the recording first" : undefined}
                   onClick={() => run("host", api.hostStop, host.refresh)}
                 >
@@ -99,16 +100,22 @@ export default function RobotPage() {
               ) : (
                 <Button
                   variant="primary"
-                  disabled={busy === "host" || !j?.ssh_configured || !j?.reachable}
+                  disabled={!j?.ssh_configured || !j?.reachable}
+                  loading={busy === "host"}
+                  loadingText="Starting…"
+                  title={!j?.ssh_configured ? "Connect to the Jetson first" : !j?.reachable ? "Jetson is not reachable" : undefined}
                   onClick={() => run("host", () => api.hostStart(camerasOn), host.refresh)}
                 >
-                  {busy === "host" ? "Starting…" : "Start host"}
+                  Start host
                 </Button>
               )}
-              <label className="flex items-center gap-2 text-sm text-ink-2">
-                <input type="checkbox" checked={camerasOn} disabled={hostRunning} onChange={(e) => setCameras(e.target.checked)} />
-                Record cameras
-              </label>
+              <Toggle
+                checked={camerasOn}
+                disabled={hostRunning}
+                onChange={setCameras}
+                label="Record cameras"
+                title={hostRunning ? "Stop the host to change this" : undefined}
+              />
               {recording && <span className="text-xs text-muted">Recording in progress: stop it before stopping the host.</span>}
             </div>
             {!camerasOn && !hostRunning && (
@@ -132,13 +139,20 @@ export default function RobotPage() {
             </p>
             <div className="flex flex-wrap gap-3">
               {teleop.proc?.state === "running" || teleop.proc?.state === "stopping" ? (
-                <Button variant="danger" disabled={teleop.proc.state === "stopping"} onClick={() => run("teleop", () => api.procStop("teleop"), teleop.refresh)}>
+                <Button
+                  variant="danger"
+                  loading={busy === "teleop" || teleop.proc.state === "stopping"}
+                  loadingText="Stopping…"
+                  onClick={() => run("teleop", () => api.procStop("teleop"), teleop.refresh)}
+                >
                   Stop teleoperation
                 </Button>
               ) : (
                 <Button
                   variant="primary"
-                  disabled={busy === "teleop" || !!recording || !j?.host_listening}
+                  disabled={!!recording || !j?.host_listening}
+                  loading={busy === "teleop"}
+                  loadingText="Starting…"
                   title={!j?.host_listening ? "Start the robot host first" : undefined}
                   onClick={() => run("teleop", api.teleopStart, teleop.refresh)}
                 >
@@ -162,13 +176,17 @@ export default function RobotPage() {
                 <CalButton
                   title="Leader arms (this machine)"
                   detail="Stops nothing on the robot. Teleoperation and recording must be stopped."
-                  disabled={calibrate.proc?.state === "running" || !!recording || teleop.proc?.state === "running"}
+                  loading={busy === "cal" && calTarget !== "follower"}
+                  active={calibrate.proc?.state === "running" && calTarget !== "follower"}
+                  blockedReason={calibrate.proc?.state === "running" ? "A calibration is already running" : recording ? "A recording is running" : teleop.proc?.state === "running" ? "Stop teleoperation first" : null}
                   onClick={() => run("cal", () => api.calibrateStart("leader"), calibrate.refresh)}
                 />
                 <CalButton
                   title="Follower arms (Jetson)"
                   detail="The robot host must be stopped first, because it uses the follower arms."
-                  disabled={calibrate.proc?.state === "running" || !j?.ssh_configured || !!j?.host_listening || hostRunning}
+                  loading={busy === "cal" && calTarget === "follower"}
+                  active={calibrate.proc?.state === "running" && calTarget === "follower"}
+                  blockedReason={calibrate.proc?.state === "running" ? "A calibration is already running" : !j?.ssh_configured ? "Connect to the Jetson first" : j?.host_listening || hostRunning ? "Stop the robot host first" : null}
                   onClick={() => run("cal", () => api.calibrateStart("follower"), calibrate.refresh)}
                 />
               </div>
@@ -177,8 +195,8 @@ export default function RobotPage() {
                   <div className="flex items-center justify-between">
                     <span className="text-sm font-medium">{calibrate.proc.title}</span>
                     {calibrate.proc.state === "running" && (
-                      <Button size="sm" variant="ghost" onClick={() => run("cal", () => api.procStop("calibrate"), calibrate.refresh)}>
-                        Cancel
+                      <Button size="sm" variant="ghost" className="text-critical-ink" onClick={() => run("cal", () => api.procStop("calibrate"), calibrate.refresh)}>
+                        Cancel calibration
                       </Button>
                     )}
                   </div>
@@ -188,9 +206,10 @@ export default function RobotPage() {
             </Card>
           </section>
 
-          <p className="text-sm text-ink-2">
-            Ready? <Link href="/" className="font-medium text-accent hover:underline">Go to Record →</Link>
-          </p>
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink-2">
+            Robot ready? Head over and start a session.
+            <LinkButton href="/" variant="primary" size="sm">Go to Record →</LinkButton>
+          </div>
         </div>
       </div>
     </div>
@@ -211,15 +230,34 @@ function Step({ n, title, status, detail }: { n: number; title: string; status: 
   );
 }
 
-function CalButton({ title, detail, disabled, onClick }: { title: string; detail: string; disabled: boolean; onClick: () => void }) {
+function CalButton({ title, detail, blockedReason, loading, active, onClick }: {
+  title: string;
+  detail: string;
+  blockedReason: string | null;
+  loading: boolean;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const disabled = !!blockedReason || loading;
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
-      className="rounded-lg border border-line p-3 text-left transition hover:border-accent hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:bg-transparent"
+      title={blockedReason ?? undefined}
+      className={`group flex flex-col rounded-lg border p-3 text-left transition enabled:hover:-translate-y-px enabled:hover:border-accent enabled:hover:shadow-md enabled:active:translate-y-0 disabled:cursor-not-allowed ${active ? "border-accent bg-accent/5" : "border-line"} ${disabled && !active ? "opacity-50" : ""}`}
     >
-      <div className="text-sm font-medium">Calibrate {title}</div>
-      <div className="mt-1 text-xs text-muted">{detail}</div>
+      <span className="flex items-center justify-between gap-2 text-sm font-medium">
+        Calibrate {title}
+        {loading ? (
+          <Spinner />
+        ) : (
+          <span aria-hidden className="text-muted transition group-enabled:group-hover:translate-x-0.5 group-enabled:group-hover:text-accent">→</span>
+        )}
+      </span>
+      <span className="mt-1 text-xs text-muted">{detail}</span>
+      {blockedReason && !active && <span className="mt-2 text-xs font-medium text-warn-ink">{blockedReason}</span>}
+      {active && <span className="mt-2 text-xs font-medium text-accent">In progress — follow the steps below</span>}
     </button>
   );
 }
@@ -228,6 +266,7 @@ function JetsonCard({ j, onDone }: { j: JetsonStatus | undefined; onDone: () => 
   const [editing, setEditing] = useState(false);
   const [user, setUser] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
@@ -284,16 +323,39 @@ function JetsonCard({ j, onDone }: { j: JetsonStatus | undefined; onDone: () => 
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Jetson username">
-                  <input className={inputClass} value={user} onChange={(e) => setUser(e.target.value)} autoComplete="off" required />
+                  <input className={inputClass} value={user} onChange={(e) => setUser(e.target.value)} autoComplete="off" spellCheck={false} autoFocus required />
                 </Field>
                 <Field label="Password">
-                  <input className={inputClass} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="off" required />
+                  <div className="relative">
+                    <input
+                      className={`${inputClass} pr-16`}
+                      type={showPassword ? "text" : "password"}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      autoComplete="off"
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      className="absolute inset-y-1 right-1 rounded-md px-2 text-xs font-medium text-ink-2 hover:bg-surface-2 hover:text-ink"
+                    >
+                      {showPassword ? "Hide" : "Show"}
+                    </button>
+                  </div>
                 </Field>
               </div>
               {error && <ErrorBox>{error}</ErrorBox>}
               <div className="flex gap-2">
-                <Button type="submit" variant="primary" disabled={busy || !user || !password || !j.reachable}>
-                  {busy ? "Connecting…" : "Connect"}
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={!user || !password || !j.reachable}
+                  loading={busy}
+                  loadingText="Connecting…"
+                  title={!j.reachable ? "Jetson is not reachable" : undefined}
+                >
+                  Connect
                 </Button>
                 {editing && <Button type="button" onClick={() => setEditing(false)}>Cancel</Button>}
               </div>

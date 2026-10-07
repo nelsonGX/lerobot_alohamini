@@ -3,6 +3,7 @@
 import { memo, useMemo, useRef, useState } from "react";
 import type { EpisodeData } from "@/lib/api";
 import { jointLabel } from "@/lib/format";
+import { Segmented } from "./ui";
 
 const W = 300;
 const H = 72;
@@ -86,16 +87,17 @@ export function JointCharts({
         <span className="tabular text-muted">
           {hover != null ? "hover" : "playhead"} · frame {shown} · {data.timestamps[shown]?.toFixed(2) ?? "–"}s
         </span>
-        <div className="ml-auto flex rounded-lg border border-line p-0.5">
-          {(["charts", "table"] as const).map((v) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              className={`rounded-md px-2.5 py-1 capitalize ${view === v ? "bg-surface-2 text-ink" : "text-muted"}`}
-            >
-              {v}
-            </button>
-          ))}
+        <div className="ml-auto">
+          <Segmented
+            size="sm"
+            label="Joint data view"
+            value={view}
+            onChange={setView}
+            options={[
+              { value: "charts", label: "Charts" },
+              { value: "table", label: "Table" },
+            ]}
+          />
         </div>
       </div>
 

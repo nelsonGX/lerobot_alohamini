@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, videoUrl, type EpisodeData, type EpisodeMeta } from "@/lib/api";
 import { cameraLabel } from "@/lib/format";
 import { JointCharts } from "./JointCharts";
-import { ErrorBox, Kbd } from "./ui";
+import { ErrorBox, IconButton, Kbd, Segmented, Toggle } from "./ui";
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4];
 
@@ -189,7 +189,7 @@ export function EpisodePlayer({ repo, episode, fps, cameras }: {
                 <figcaption className="flex items-center justify-between bg-surface px-3 py-1.5 text-xs text-ink-2">
                   <span className="capitalize">{cameraLabel(cam)}</span>
                   {cams.length > 1 && (
-                    <button className="text-muted hover:text-ink" onClick={() => setFocus(focus ? null : cam)}>
+                    <button className="rounded px-1.5 py-0.5 text-muted transition hover:bg-surface-2 hover:text-ink" onClick={() => setFocus(focus ? null : cam)}>
                       {focus ? "Show all cameras" : "Enlarge"}
                     </button>
                   )}
@@ -211,7 +211,8 @@ export function EpisodePlayer({ repo, episode, fps, cameras }: {
             if (!playing && t >= duration - 1 / fps) seek(0);
             setPlaying(!playing);
           }}
-          className="flex size-9 items-center justify-center rounded-full bg-accent text-accent-ink"
+          className="flex size-10 shrink-0 items-center justify-center rounded-full bg-accent text-accent-ink shadow-sm transition hover:brightness-110 active:scale-95"
+          title={playing ? "Pause (Space)" : "Play (Space)"}
           aria-label={playing ? "Pause" : "Play"}
         >
           {playing ? (
@@ -220,8 +221,12 @@ export function EpisodePlayer({ repo, episode, fps, cameras }: {
             <svg viewBox="0 0 16 16" className="size-4" fill="currentColor"><path d="M4 2.5v11a.5.5 0 0 0 .77.42l8.5-5.5a.5.5 0 0 0 0-.84l-8.5-5.5A.5.5 0 0 0 4 2.5z" /></svg>
           )}
         </button>
-        <button className="rounded-md px-2 py-1 text-sm text-ink-2 hover:bg-surface-2" onClick={() => { setPlaying(false); seekFrame(frame - 1); }} aria-label="Previous frame">‹</button>
-        <button className="rounded-md px-2 py-1 text-sm text-ink-2 hover:bg-surface-2" onClick={() => { setPlaying(false); seekFrame(frame + 1); }} aria-label="Next frame">›</button>
+        <IconButton label="Previous frame (←)" disabled={frame <= 0} onClick={() => { setPlaying(false); seekFrame(frame - 1); }}>
+          <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><path d="M10 3.5 5.5 8l4.5 4.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </IconButton>
+        <IconButton label="Next frame (→)" disabled={frame >= lastFrame} onClick={() => { setPlaying(false); seekFrame(frame + 1); }}>
+          <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><path d="m6 3.5 4.5 4.5L6 12.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </IconButton>
         <input
           type="range"
           min={0}
@@ -232,26 +237,15 @@ export function EpisodePlayer({ repo, episode, fps, cameras }: {
             setPlaying(false);
             seekFrame(Number(e.target.value));
           }}
-          className="min-w-40 flex-1 accent-[var(--accent)]"
+          className="h-2 min-w-40 flex-1 cursor-pointer accent-[var(--accent)]"
           aria-label="Scrub"
         />
         <span className="tabular w-36 text-right text-xs text-ink-2">
           {t.toFixed(2)}s / {duration.toFixed(1)}s<br />
           <span className="text-muted">frame {frame} / {lastFrame}</span>
         </span>
-        <select
-          value={speed}
-          onChange={(e) => setSpeed(Number(e.target.value))}
-          className="rounded-md border border-line bg-surface px-2 py-1 text-xs"
-          aria-label="Playback speed"
-        >
-          {SPEEDS.map((s) => (
-            <option key={s} value={s}>{s}×</option>
-          ))}
-        </select>
-        <label className="flex items-center gap-1 text-xs text-ink-2">
-          <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> Loop
-        </label>
+        <Segmented size="sm" label="Playback speed" value={speed} onChange={setSpeed} options={SPEEDS.map((s) => ({ value: s, label: `${s}×` }))} />
+        <Toggle size="sm" checked={loop} onChange={setLoop} label="Loop" />
       </div>
       <p className="-mt-2 text-xs text-muted">
         <Kbd>Space</Kbd> play/pause · <Kbd>←</Kbd> <Kbd>→</Kbd> step a frame (hold Shift for 1 s) · <Kbd>[</Kbd> <Kbd>]</Kbd> previous/next episode · click a chart to seek

@@ -25,18 +25,20 @@ export function Preflight({ checks, onRefresh, loading }: { checks: Check[] | nu
   return (
     <Card
       title={
-        <span className="flex items-center gap-2">
+        <span className="flex items-center gap-2 whitespace-nowrap">
           Pre-flight checks
           {checks && (
-            <span className={`text-xs font-normal ${failing ? "text-critical-ink" : "text-good-ink"}`}>
+            <span
+              className={`rounded-full px-2 py-0.5 text-xs font-medium ${failing ? "bg-critical/10 text-critical-ink" : "bg-good/10 text-good-ink"}`}
+            >
               {failing ? `${failing} problem${failing > 1 ? "s" : ""}` : "all good"}
             </span>
           )}
         </span>
       }
       actions={
-        <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading}>
-          {loading ? "Checking…" : "Re-check"}
+        <Button size="sm" variant="ghost" className="px-2" onClick={onRefresh} loading={loading} loadingText="Checking…">
+          Re-check
         </Button>
       }
     >
@@ -45,15 +47,15 @@ export function Preflight({ checks, onRefresh, loading }: { checks: Check[] | nu
       ) : (
         <ul className="grid gap-3">
           {checks.map((c) => (
-            <li key={c.id} className="flex gap-2.5">
+            <li key={c.id} className={`flex gap-2.5 rounded-lg ${c.status === "fail" ? "-mx-2 bg-critical/5 px-2 py-1.5" : ""}`}>
               <StatusIcon status={c.status} className="mt-0.5" />
               <div className="min-w-0 text-sm">
                 <div className="font-medium">{c.label}</div>
                 <div className="break-words text-xs text-ink-2">{c.detail}</div>
                 {c.hint && <div className="mt-0.5 break-words text-xs text-muted">→ {c.hint}</div>}
                 {(c.action === "start_host" || c.action === "stop_teleop") && (
-                  <Button size="sm" variant="primary" className="mt-1.5" disabled={fixing === c.id} onClick={() => fix(c)}>
-                    {fixing === c.id ? "Working…" : c.action === "start_host" ? "Start robot host" : "Stop teleoperation"}
+                  <Button size="sm" variant="primary" className="mt-1.5" loading={fixing === c.id} loadingText="Working…" onClick={() => fix(c)}>
+                    {c.action === "start_host" ? "Start robot host" : "Stop teleoperation"}
                   </Button>
                 )}
                 {(c.action === "setup_jetson" || c.action === "calibrate_leader") && (

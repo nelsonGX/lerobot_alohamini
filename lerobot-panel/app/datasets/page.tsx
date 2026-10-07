@@ -2,20 +2,27 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { ErrorBox, inputClass } from "@/components/ui";
+import { ErrorBox, SearchInput, Segmented } from "@/components/ui";
 import { api } from "@/lib/api";
 import { cameraLabel, fmtAgo, fmtBytes, fmtDuration } from "@/lib/format";
-import { usePoll } from "@/lib/hooks";
+import { useLocalStorage, usePoll } from "@/lib/hooks";
+
+type Sort = "recent" | "name" | "episodes";
 
 export default function DatasetsPage() {
   const { data, error } = usePoll(api.datasets, 10000);
   const [filter, setFilter] = useState("");
+  const [sort, setSort] = useLocalStorage<Sort>("panel.datasets.sort", "recent");
   const list = useMemo(() => {
     const f = filter.trim().toLowerCase();
-    return (data?.datasets ?? []).filter(
+    const out = (data?.datasets ?? []).filter(
       (d) => !f || d.repo_id.toLowerCase().includes(f) || d.tasks?.some((t) => t.toLowerCase().includes(f)),
     );
-  }, [data, filter]);
+    if (sort === "name") out.sort((a, b) => a.repo_id.localeCompare(b.repo_id));
+    else if (sort === "episodes") out.sort((a, b) => (b.total_episodes ?? 0) - (a.total_episodes ?? 0));
+    else out.sort((a, b) => (b.modified_at ?? 0) - (a.modified_at ?? 0));
+    return out;
+  }, [data, filter, sort]);
 
   const totals = useMemo(() => {
     const ds = data?.datasets ?? [];
@@ -34,12 +41,19 @@ export default function DatasetsPage() {
             {data ? `${data.datasets.length} datasets · ${totals.episodes} episodes · ${fmtDuration(totals.duration)} of demonstrations` : "Loading…"}
           </p>
         </div>
-        <input
-          className={`${inputClass} max-w-72`}
-          placeholder="Filter by name or task…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <Segmented
+            label="Sort datasets"
+            value={sort}
+            onChange={setSort}
+            options={[
+              { value: "recent", label: "Recent" },
+              { value: "name", label: "Name" },
+              { value: "episodes", label: "Episodes" },
+            ]}
+          />
+          <SearchInput className="min-w-0 flex-1 sm:w-72 sm:flex-none" placeholder="Filter by name or task…" value={filter} onChange={setFilter} />
+        </div>
       </div>
       {error && <ErrorBox>{error}</ErrorBox>}
       {data && list.length === 0 && (
@@ -49,7 +63,10 @@ export default function DatasetsPage() {
               No datasets yet. <Link href="/" className="text-accent underline">Record your first session</Link>.
             </>
           ) : (
-            "No datasets match the filter."
+            <>
+              No datasets match “{filter}”.{" "}
+              <button className="text-accent underline" onClick={() => setFilter("")}>Clear filter</button>
+            </>
           )}
         </div>
       )}
@@ -60,7 +77,7 @@ export default function DatasetsPage() {
             <Link
               key={d.repo_id}
               href={`/datasets/view?repo=${encodeURIComponent(d.repo_id)}`}
-              className="group rounded-xl border border-line bg-surface p-4 transition hover:border-accent"
+              className="group rounded-xl border border-line bg-surface p-4 transition hover:-translate-y-0.5 hover:border-accent hover:shadow-md active:translate-y-0"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">

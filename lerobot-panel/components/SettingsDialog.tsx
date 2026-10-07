@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { api, type Settings } from "@/lib/api";
-import { Button, ErrorBox, Field, inputClass, Modal } from "./ui";
+import { Button, ErrorBox, Field, inputClass, Modal, NumberInput, Select, Spinner } from "./ui";
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [s, setS] = useState<Settings | null>(null);
+  const [original, setOriginal] = useState<Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -14,6 +15,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
       api.settings().then(
         (fresh) => {
           setS(fresh);
+          setOriginal(fresh);
           setError(null);
         },
         (e) => setError(e.message),
@@ -22,11 +24,10 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS((prev) => (prev ? { ...prev, [k]: v } : prev));
   const num = (k: keyof Settings) => ({
-    type: "number",
-    className: inputClass,
-    value: s ? String(s[k]) : "",
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => set(k, Number(e.target.value) as never),
+    value: s ? Number(s[k]) : 0,
+    onChange: (v: number) => set(k, v as never),
   });
+  const dirty = !!s && !!original && JSON.stringify(s) !== JSON.stringify(original);
 
   const save = async () => {
     if (!s) return;
@@ -45,27 +46,39 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
     <Modal open={open} onClose={onClose} title="Panel settings">
       <p className="mb-4 text-sm text-ink-2">Shared by everyone using this panel. Changes apply the next time something is started.</p>
       {error && <ErrorBox>{error}</ErrorBox>}
+      {!s && !error && (
+        <p className="flex items-center gap-2 text-sm text-muted">
+          <Spinner /> Loading settings…
+        </p>
+      )}
       {s && (
-        <div className="grid gap-4">
+        <form
+          noValidate
+          className="grid gap-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save();
+          }}
+        >
           <div className="grid grid-cols-2 gap-3">
             <Field label="Jetson IP" hint="Where the robot host runs">
-              <input className={inputClass} value={s.jetson_ip} onChange={(e) => set("jetson_ip", e.target.value.trim())} />
+              <input className={`${inputClass} font-mono`} inputMode="decimal" spellCheck={false} value={s.jetson_ip} onChange={(e) => set("jetson_ip", e.target.value.trim())} />
             </Field>
             <Field label="Robot model">
-              <select className={inputClass} value={s.robot_model} onChange={(e) => set("robot_model", e.target.value)}>
+              <Select value={s.robot_model} onChange={(e) => set("robot_model", e.target.value)}>
                 <option>alohamini1</option>
                 <option>alohamini2</option>
                 <option>alohamini2pro</option>
-              </select>
+              </Select>
             </Field>
             <Field label="Leader arm ID" hint="Calibration file name">
               <input className={inputClass} value={s.teleop_id} onChange={(e) => set("teleop_id", e.target.value.trim())} />
             </Field>
             <Field label="Leader arm profile">
-              <select className={inputClass} value={s.arm_profile} onChange={(e) => set("arm_profile", e.target.value)}>
+              <Select value={s.arm_profile} onChange={(e) => set("arm_profile", e.target.value)}>
                 <option>so-arm-5dof</option>
                 <option>am-leader-6dof</option>
-              </select>
+              </Select>
             </Field>
           </div>
           <div className="border-t border-line pt-4">
@@ -90,19 +103,25 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               <Field label="Dataset namespace" hint="Prefix, e.g. alohamini/…">
                 <input className={inputClass} value={s.default_namespace} onChange={(e) => set("default_namespace", e.target.value.trim())} />
               </Field>
-              <Field label="Episodes per session"><input min={1} {...num("default_num_episodes")} /></Field>
-              <Field label="Episode length (s)"><input min={3} {...num("default_episode_time_s")} /></Field>
-              <Field label="Reset time (s)"><input min={0} {...num("default_reset_time_s")} /></Field>
-              <Field label="FPS"><input min={1} {...num("default_fps")} /></Field>
+              <Field label="Episodes per session"><NumberInput min={1} max={500} {...num("default_num_episodes")} /></Field>
+              <Field label="Episode length"><NumberInput min={3} max={600} step={5} suffix="s" {...num("default_episode_time_s")} /></Field>
+              <Field label="Reset time"><NumberInput min={0} max={300} step={5} suffix="s" {...num("default_reset_time_s")} /></Field>
+              <Field label="FPS"><NumberInput min={1} max={120} step={5} {...num("default_fps")} /></Field>
             </div>
           </div>
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex items-center justify-end gap-2 border-t border-line pt-4">
+            {dirty && <span className="mr-auto text-xs text-warn-ink">Unsaved changes</span>}
+            {dirty && (
+              <Button variant="ghost" onClick={() => setS(original)}>
+                Reset
+              </Button>
+            )}
             <Button onClick={onClose}>Cancel</Button>
-            <Button variant="primary" onClick={save} disabled={saving}>
-              {saving ? "Saving…" : "Save settings"}
+            <Button type="submit" variant="primary" disabled={!dirty} loading={saving} loadingText="Saving…">
+              Save settings
             </Button>
           </div>
-        </div>
+        </form>
       )}
     </Modal>
   );

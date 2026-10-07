@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EpisodePlayer } from "@/components/EpisodePlayer";
-import { Button, Card, ErrorBox, inputClass, Modal, StatusIcon } from "@/components/ui";
+import { Button, Card, ErrorBox, IconButton, inputClass, Kbd, LinkButton, Modal, StatusIcon } from "@/components/ui";
 import { api, type DatasetDetail, type JobState } from "@/lib/api";
 import { cameraLabel, fmtAgo, fmtBytes, fmtDuration } from "@/lib/format";
 
@@ -78,6 +78,13 @@ function DatasetView() {
   const current = episodes.find((e) => String(e.index) === epParam) ?? episodes[0];
   const busy = !!job?.running && job.repo_id === repo;
 
+  // Keep the current episode visible in the sidebar when moving with [ ].
+  const listRef = useRef<HTMLUListElement>(null);
+  const currentIndex = current?.index;
+  useEffect(() => {
+    listRef.current?.querySelector(`[data-ep="${currentIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [currentIndex]);
+
   const goTo = useCallback(
     (index: number) => router.replace(`/datasets/view?repo=${encodeURIComponent(repo)}&ep=${index}`, { scroll: false }),
     [router, repo],
@@ -87,7 +94,18 @@ function DatasetView() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("input:not([type=range]), textarea, select")) return;
-      if (!current || (e.key !== "[" && e.key !== "]")) return;
+      if (!current) return;
+      if (e.key.toLowerCase() === "x" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const idx = current.index;
+        setSelected((s) => {
+          const n = new Set(s);
+          if (n.has(idx)) n.delete(idx);
+          else n.add(idx);
+          return n;
+        });
+        return;
+      }
+      if (e.key !== "[" && e.key !== "]") return;
       const i = episodes.indexOf(current) + (e.key === "]" ? 1 : -1);
       if (episodes[i]) goTo(episodes[i].index);
     };
@@ -125,12 +143,14 @@ function DatasetView() {
           <p className="text-sm text-ink-2">{ds.tasks.join(" · ") || "No task"}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Link href={`/?dataset=${encodeURIComponent(ds.repo_id)}&task=${encodeURIComponent(ds.tasks.at(-1) ?? "")}`}>
-            <Button variant="danger" disabled={ds.recording}>
-              <span className="size-2.5 rounded-full bg-white" /> Record more
-            </Button>
-          </Link>
-          <Button variant="ghost" onClick={() => setConfirmDrop(true)} disabled={ds.recording || busy}>
+          <LinkButton
+            variant="danger"
+            disabled={ds.recording}
+            href={`/?dataset=${encodeURIComponent(ds.repo_id)}&task=${encodeURIComponent(ds.tasks.at(-1) ?? "")}`}
+          >
+            <span className="size-2.5 rounded-full bg-white" /> Record more
+          </LinkButton>
+          <Button variant="ghost" className="text-critical-ink" onClick={() => setConfirmDrop(true)} disabled={ds.recording || busy}>
             Delete dataset…
           </Button>
         </div>
@@ -158,7 +178,7 @@ function DatasetView() {
             <b>{job.description}</b>
             <span className="text-ink-2">{job.running ? "— working, this can take a minute…" : job.status === "done" ? "— done" : "— failed"}</span>
             {!job.running && (
-              <button className="ml-auto text-xs text-muted hover:text-ink" onClick={() => setShowJob(false)}>Dismiss</button>
+              <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setShowJob(false)}>Dismiss</Button>
             )}
           </div>
           {job.status === "failed" && <pre className="mt-2 max-h-40 overflow-auto text-xs">{job.output.join("\n")}</pre>}
@@ -175,9 +195,13 @@ function DatasetView() {
             <div className="flex items-center justify-between border-b border-line px-3 py-2 text-xs text-muted">
               <span>{episodes.length} episodes</span>
               {selected.size > 0 ? (
-                <span className="flex gap-2">
-                  <button className="hover:text-ink" onClick={() => setSelected(new Set())}>Clear</button>
-                  <button className="font-semibold text-critical-ink" onClick={() => setConfirmDelete(true)} disabled={busy || ds.recording}>
+                <span className="pop-in flex items-center gap-1">
+                  <button className="rounded px-1.5 py-0.5 hover:bg-surface-2 hover:text-ink" onClick={() => setSelected(new Set())}>Clear</button>
+                  <button
+                    className="rounded bg-critical px-2 py-0.5 font-semibold text-white transition hover:brightness-110 disabled:opacity-40"
+                    onClick={() => setConfirmDelete(true)}
+                    disabled={busy || ds.recording}
+                  >
                     Delete {selected.size}
                   </button>
                 </span>
@@ -185,14 +209,18 @@ function DatasetView() {
                 <span>tick to select</span>
               )}
             </div>
-            <ul className="flex-1 overflow-y-auto py-1">
+            <ul ref={listRef} className="flex-1 overflow-y-auto py-1">
               {episodes.map((e) => {
                 const on = current?.index === e.index;
                 const short = e.duration_s < avgLen * 0.4;
                 return (
-                  <li key={e.index} className={`flex items-center gap-2 px-3 py-1.5 ${on ? "bg-surface-2" : "hover:bg-surface-2/60"}`}>
-                    <input type="checkbox" checked={selected.has(e.index)} onChange={() => toggle(e.index)} aria-label={`Select episode ${e.index}`} />
-                    <button className="flex min-w-0 flex-1 items-baseline gap-2 text-left" onClick={() => goTo(e.index)}>
+                  <li
+                    key={e.index}
+                    data-ep={e.index}
+                    className={`flex items-center gap-2 border-l-2 px-3 py-1.5 transition-colors ${on ? "border-accent bg-surface-2" : "border-transparent hover:bg-surface-2/60"} ${selected.has(e.index) ? "text-critical-ink" : ""}`}
+                  >
+                    <input type="checkbox" className="size-4" checked={selected.has(e.index)} onChange={() => toggle(e.index)} aria-label={`Select episode ${e.index}`} />
+                    <button className="flex min-w-0 flex-1 items-baseline gap-2 py-0.5 text-left" onClick={() => goTo(e.index)} aria-current={on || undefined}>
                       <span className={`tabular w-10 text-sm ${on ? "font-semibold" : ""}`}>#{e.index}</span>
                       <span className="tabular text-xs text-ink-2">{e.duration_s.toFixed(1)}s</span>
                       {short && <span className="text-[10px] text-warn-ink" title="Much shorter than average — worth checking">short</span>}
@@ -212,15 +240,20 @@ function DatasetView() {
                   <span className="text-sm text-ink-2">
                     {current.duration_s.toFixed(1)}s · {current.length} frames · {current.tasks.join(", ")}
                   </span>
-                  <span className="ml-auto flex gap-2">
-                    <Button size="sm" variant="ghost" onClick={() => goTo(episodes[episodes.indexOf(current) - 1]?.index)} disabled={episodes.indexOf(current) === 0}>‹ Prev</Button>
-                    <Button size="sm" variant="ghost" onClick={() => goTo(episodes[episodes.indexOf(current) + 1]?.index)} disabled={episodes.indexOf(current) === episodes.length - 1}>Next ›</Button>
+                  <span className="ml-auto flex items-center gap-2">
+                    <span className="flex items-center rounded-lg border border-line">
+                      <Button size="sm" variant="ghost" className="rounded-r-none" title="Previous episode ( [ )" onClick={() => goTo(episodes[episodes.indexOf(current) - 1]?.index)} disabled={episodes.indexOf(current) === 0}>‹ Prev</Button>
+                      <span className="tabular border-x border-line px-2 text-xs text-muted">{episodes.indexOf(current) + 1} / {episodes.length}</span>
+                      <Button size="sm" variant="ghost" className="rounded-l-none" title="Next episode ( ] )" onClick={() => goTo(episodes[episodes.indexOf(current) + 1]?.index)} disabled={episodes.indexOf(current) === episodes.length - 1}>Next ›</Button>
+                    </span>
                     <Button
                       size="sm"
                       variant={selected.has(current.index) ? "warn" : "secondary"}
                       onClick={() => toggle(current.index)}
+                      aria-pressed={selected.has(current.index)}
+                      title="Toggle with X"
                     >
-                      {selected.has(current.index) ? "Marked for deletion" : "Mark as bad"}
+                      {selected.has(current.index) ? "✓ Marked for deletion" : "Mark as bad"} <Kbd>X</Kbd>
                     </Button>
                   </span>
                 </div>
@@ -275,14 +308,20 @@ function CopyLine({ text }: { text: string }) {
       setTimeout(() => setCopied(false), 1500);
     } catch {
       // Clipboard API needs HTTPS/localhost; fall back to selecting the text.
-      const code = e.currentTarget.previousElementSibling;
+      const code = e.currentTarget.parentElement?.querySelector("code");
       if (code) window.getSelection()?.selectAllChildren(code);
     }
   };
   return (
-    <div className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2">
-      <code className="min-w-0 flex-1 truncate font-mono text-xs">{text}</code>
-      <button className="shrink-0 text-xs text-accent" onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+    <div className="flex items-center gap-2 rounded-lg bg-surface-2 py-1 pr-1 pl-3">
+      <code className="min-w-0 flex-1 truncate font-mono text-xs" title={text}>{text}</code>
+      <IconButton label={copied ? "Copied" : "Copy"} onClick={copy} className={copied ? "text-good-ink" : ""}>
+        {copied ? (
+          <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><path d="m3.5 8.5 3 3 6-7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        ) : (
+          <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" /></svg>
+        )}
+      </IconButton>
     </div>
   );
 }
@@ -322,7 +361,7 @@ function DeleteEpisodesModal({ open, onClose, repo, episodes, onStarted }: {
         {error && <ErrorBox>{error}</ErrorBox>}
         <div className="mt-2 flex justify-end gap-2">
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="danger" onClick={submit} disabled={busy}>{busy ? "Starting…" : "Delete episodes"}</Button>
+          <Button variant="danger" onClick={submit} loading={busy} loadingText="Starting…">Delete episodes</Button>
         </div>
       </div>
     </Modal>
@@ -332,12 +371,17 @@ function DeleteEpisodesModal({ open, onClose, repo, episodes, onStarted }: {
 function DeleteDatasetModal({ open, onClose, repo, onDeleted }: { open: boolean; onClose: () => void; repo: string; onDeleted: () => void }) {
   const [typed, setTyped] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const submit = async () => {
+    if (typed !== repo) return;
+    setBusy(true);
     try {
       await api.deleteDataset(repo, typed);
       onDeleted();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
   return (
@@ -346,12 +390,20 @@ function DeleteDatasetModal({ open, onClose, repo, onDeleted }: { open: boolean;
         <p>This permanently deletes every episode and video in <span className="font-mono text-ink">{repo}</span> from this machine. It cannot be undone.</p>
         <label className="grid gap-1">
           <span>Type the dataset name to confirm:</span>
-          <input className={`${inputClass} font-mono`} value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={repo} />
+          <input
+            className={`${inputClass} font-mono ${typed === repo ? "border-critical" : ""}`}
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder={repo}
+            spellCheck={false}
+            autoComplete="off"
+          />
         </label>
         {error && <ErrorBox>{error}</ErrorBox>}
         <div className="mt-2 flex justify-end gap-2">
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="danger" disabled={typed !== repo} onClick={submit}>Delete forever</Button>
+          <Button variant="danger" disabled={typed !== repo} loading={busy} loadingText="Deleting…" onClick={submit}>Delete forever</Button>
         </div>
       </div>
     </Modal>
