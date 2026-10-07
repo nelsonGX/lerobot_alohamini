@@ -23,8 +23,8 @@ from ..config import RobotConfig
 def alohamini_cameras_config() -> dict[str, CameraConfig]:
     # USB port paths keep each view stable when /dev/video indices change.
     return {
-        "forward": OpenCVCameraConfig(
-            index_or_path="/dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0",
+        "overhead": OpenCVCameraConfig(
+            index_or_path="/dev/v4l/by-path/platform-3610000.usb-usb-0:2.2:1.0-video-index0",
             fps=30,
             width=640,
             height=480,
