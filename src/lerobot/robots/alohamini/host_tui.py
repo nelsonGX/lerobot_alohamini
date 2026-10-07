@@ -320,10 +320,10 @@ class HostTui:
 class HostStatusPublisher:
     """Writes what the dashboard shows as JSON, so the web panel can mirror it when there is no terminal.
 
-    Same inputs as `HostTui.update`; the file is replaced atomically a few times a second.
+    Same inputs as `HostTui.update`; the file is replaced atomically up to 20 times a second.
     """
 
-    def __init__(self, robot: Any, path: str, *, subtitle: str, rate_hz: float = 5.0):
+    def __init__(self, robot: Any, path: str, *, subtitle: str, rate_hz: float = 20.0):
         self.robot = robot
         self.path = path
         self.subtitle = subtitle

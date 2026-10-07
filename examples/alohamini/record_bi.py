@@ -146,6 +146,23 @@ def main():
         default=True,
         help="Whether to upload the dataset to Hugging Face Hub after recording.",
     )
+    parser.add_argument(
+        "--dataset.streaming_encoding",
+        "--streaming_encoding",
+        dest="streaming_encoding",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Encode video while recording so saving an episode is fast (default: enabled).",
+    )
+    parser.add_argument(
+        "--dataset.encoder_threads",
+        dest="encoder_threads",
+        type=int,
+        default=2,
+        help="Encoder threads used with streaming encoding.",
+    )
 
     args = parser.parse_args()
 
@@ -189,6 +206,8 @@ def main():
             repo_id=args.dataset_repo_id,
             root=dataset_root,
             image_writer_threads=4,
+            streaming_encoding=args.streaming_encoding,
+            encoder_threads=args.encoder_threads,
         )
     else:
         dataset = LeRobotDataset.create(
@@ -199,6 +218,8 @@ def main():
             robot_type=robot.name,
             use_videos=True,
             image_writer_threads=4,
+            streaming_encoding=args.streaming_encoding,
+            encoder_threads=args.encoder_threads,
         )
 
     # === Connect devices ===

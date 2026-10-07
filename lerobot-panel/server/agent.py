@@ -11,6 +11,7 @@ import asyncio
 import hmac
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -28,7 +29,7 @@ from procs import HOST_MODULE, ConsoleProcess
 TOKEN_FILE = DATA_DIR / "agent_token"
 CALIBRATE_MODULE = "lerobot.robots.alohamini.alohamini_calibrate"
 BOOT = time.time()
-HOST_STATUS_FILE = "/tmp/alohamini_host_status.json"  # written by the host (--status_file), ~5 Hz
+HOST_STATUS_FILE = "/tmp/alohamini_host_status.json"  # written by the host (--status_file), ~20 Hz
 
 
 def load_token() -> str:
@@ -125,7 +126,10 @@ def _devices() -> list[dict]:
 
 
 def _host_pids() -> list[int]:
-    res = subprocess.run(["pgrep", "-f", HOST_MODULE], capture_output=True, text=True)
+    # Anchor on the interpreter itself: a bare `pgrep -f <module>` also matches `bash -c`/ssh wrappers
+    # (and this agent's own shells) that merely mention the module, reporting a host that isn't running.
+    pattern = rf"^\S*python[0-9.]*\s+-m\s+{re.escape(HOST_MODULE)}(\s|$)"
+    res = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
     return [int(x) for x in res.stdout.split() if int(x) != os.getpid()]
 
 
@@ -274,6 +278,6 @@ async def stream(sock: WebSocket) -> None:
             if time.time() - last_status >= 2:
                 last_status = time.time()
                 await sock.send_json({"type": "status", "data": await asyncio.to_thread(status)})
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.05)
     except (WebSocketDisconnect, RuntimeError):
         return
