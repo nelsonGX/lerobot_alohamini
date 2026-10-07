@@ -37,9 +37,12 @@ The agent runs the robot host, so the host keeps running if the panel restarts; 
 
 ## What it does
 
-- **Record**: pre-flight checks (leader arms, calibration, ports already in use, Jetson host,
-  disk space), then a session runs `examples/alohamini/record_bi.py`. The buttons send the
-  same keys as the terminal (N = next, R = re-record, Q = stop). Optional voice cues.
+- **Record** (teammates: see [`RECORDING.md`](./RECORDING.md)): pre-flight checks, then a session runs
+  `examples/alohamini/record_panel.py`, one shared dataset (`examples/alohamini/collection.yaml`). For every episode the panel
+  shows a random 3-object layout and a task chosen from the fixed list (the one furthest behind its target is suggested), then
+  the operator **saves, discards or re-records**; nothing partial is ever written. Live stream health (FPS, latency, frame gaps),
+  automatic flags for bad episodes, operator name and layout stored per episode, and an **Upload** button (private Hugging Face
+  repo or rsync). `PANEL_SIMULATE=1 ./panel` runs all of it on fake hardware.
 - **Robot**: no terminal needed for the rest.
   - Start/stop the robot host on the Jetson through the agent (what `./host` does), with or without cameras.
     A host started from a terminal is detected and can be stopped too.
@@ -55,8 +58,8 @@ The agent runs the robot host, so the host keeps running if the panel restarts; 
 
 ## Layout
 
-- `server/`: FastAPI backend. It runs the recorder in a pseudo-terminal and parses its output
-  (`recorder.py`), and also handles dataset reading (`dataset_store.py`), checks
+- `server/`: FastAPI backend. It runs the recording engine as a child process, sends it JSON commands and tails its
+  event file (`recorder.py`), starts uploads (`upload.py`), and also handles dataset reading (`dataset_store.py`), checks
   (`preflight.py`), the host/teleop/calibration programs (`procs.py`, shown via the tiny
   terminal emulator in `term.py`) and routes (`main.py`).
 - `app/`, `components/`, `lib/`: Next.js UI, exported as static files to `out/` and served

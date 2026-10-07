@@ -11,6 +11,7 @@ from pathlib import Path
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+import collection
 from config import lerobot_home
 
 REPO_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -109,6 +110,23 @@ def _episodes_table(root: Path):
     return rows
 
 
+def _note(rec: dict | None) -> dict | None:
+    """What the panel recorded about an episode (operator, layout, health flags), trimmed for the browser."""
+    if not rec or rec.get("stub"):
+        return None
+    layout = rec.get("layout") or {}
+    return {
+        "operator": rec.get("operator"),
+        "recorded_at": rec.get("recorded_at"),
+        "task_id": rec.get("task_id"),
+        "layout": layout.get("names"),
+        "target_slot": layout.get("target_slot"),
+        "flagged": bool(rec.get("flagged")),
+        "flags": rec.get("flags") or [],
+        "fps": (rec.get("health") or {}).get("fps"),
+    }
+
+
 def dataset_detail(repo_id: str) -> dict:
     root = dataset_root(repo_id)
     if not (root / "meta" / "info.json").exists():
@@ -118,6 +136,7 @@ def dataset_detail(repo_id: str) -> dict:
     fps = summary["fps"]
     cameras = summary["cameras"]
     episodes = []
+    notes = {r.get("episode_index"): r for r in collection.read_records(root)}
     for r in _episodes_table(root):
         videos = {}
         for cam in cameras:
@@ -136,6 +155,7 @@ def dataset_detail(repo_id: str) -> dict:
                 "duration_s": r["length"] / fps,
                 "tasks": r.get("tasks") or [],
                 "videos": videos,
+                "collection": _note(notes.get(r["episode_index"])),
             }
         )
     features = {

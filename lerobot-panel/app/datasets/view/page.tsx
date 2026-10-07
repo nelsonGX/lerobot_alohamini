@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EpisodePlayer } from "@/components/EpisodePlayer";
 import { Button, Card, ErrorBox, IconButton, inputClass, Kbd, LinkButton, Modal, StatusIcon } from "@/components/ui";
-import { api, type DatasetDetail } from "@/lib/api";
+import { api, type DatasetDetail, type EpisodeMeta } from "@/lib/api";
 import { useTopic } from "@/lib/live";
 import { cameraLabel, fmtAgo, fmtBytes, fmtDuration } from "@/lib/format";
 
@@ -118,6 +118,7 @@ function DatasetView() {
     });
 
   const avgLen = episodes.length ? ds.duration_s / episodes.length : 0;
+  const flaggedIdx = episodes.filter((e) => e.collection?.flagged).map((e) => e.index);
   const trainCmd = `./train ${ds.repo_id} act`;
 
   return (
@@ -191,6 +192,10 @@ function DatasetView() {
                     Delete {selected.size}
                   </button>
                 </span>
+              ) : flaggedIdx.length > 0 ? (
+                <button className="rounded px-1.5 py-0.5 text-warn-ink hover:bg-surface-2" onClick={() => setSelected(new Set(flaggedIdx))} title="Select every episode the recorder flagged as possibly bad">
+                  Select {flaggedIdx.length} flagged
+                </button>
               ) : (
                 <span>tick to select</span>
               )}
@@ -210,6 +215,7 @@ function DatasetView() {
                       <span className={`tabular w-10 text-sm ${on ? "font-semibold" : ""}`}>#{e.index}</span>
                       <span className="tabular text-xs text-ink-2">{e.duration_s.toFixed(1)}s</span>
                       {short && <span className="text-[10px] text-warn-ink" title="Much shorter than average — worth checking">short</span>}
+                      {e.collection?.flagged && <span className="text-[10px] font-semibold text-critical-ink" title={e.collection.flags.map((f) => f.message).join(" ")}>flagged</span>}
                       {ds.tasks.length > 1 && <span className="truncate text-xs text-muted">{e.tasks[0]}</span>}
                     </button>
                   </li>
@@ -243,6 +249,7 @@ function DatasetView() {
                     </Button>
                   </span>
                 </div>
+                {current.collection && <EpisodeNotes note={current.collection} />}
                 <EpisodePlayer repo={ds.repo_id} episode={current} fps={ds.fps} cameras={ds.cameras} />
               </>
             )}
@@ -393,5 +400,34 @@ function DeleteDatasetModal({ open, onClose, repo, onDeleted }: { open: boolean;
         </div>
       </div>
     </Modal>
+  );
+}
+
+/** What the recording panel noted: who recorded it, the object layout, and any automatic flags. */
+function EpisodeNotes({ note }: { note: NonNullable<EpisodeMeta["collection"]> }) {
+  return (
+    <div className="mb-3 grid gap-1.5 text-xs text-ink-2">
+      <div>
+        Recorded by <b className="text-ink">{note.operator ?? "unknown"}</b>
+        {note.recorded_at && ` · ${new Date(note.recorded_at).toLocaleString()}`}
+        {note.layout && (
+          <>
+            {" · layout "}
+            {Object.entries(note.layout).map(([slot, name]) => (
+              <span key={slot} className={slot === note.target_slot ? "font-semibold text-ink" : ""}>
+                {slot}: {name}
+                {"; "}
+              </span>
+            ))}
+          </>
+        )}
+      </div>
+      {note.flags.map((f) => (
+        <div key={f.code} className={f.severity === "bad" ? "text-critical-ink" : "text-warn-ink"}>
+          {f.severity === "bad" ? "▲ " : "△ "}
+          {f.message}
+        </div>
+      ))}
+    </div>
   );
 }

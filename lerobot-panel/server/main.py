@@ -7,25 +7,33 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+# collection.py is shared with the recording engine in examples/alohamini; it must be importable before the
+# modules below (and without torch).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "alohamini"))
 
-import dataset_store
-from camera_feed import CameraFeed
-from live import Hub
-from config import EDIT_DATASET, REPO_ROOT, STATIC_DIR, Settings, load_settings, save_settings
-from preflight import run_checks
-from procs import AgentError, Controls, ProcBusy, agent_call, read_token, save_token
-from recorder import Recorder, RecorderBusy, load_history
+from fastapi import FastAPI, HTTPException, WebSocket  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+
+import collection  # noqa: E402
+import dataset_store  # noqa: E402
+from camera_feed import CameraFeed  # noqa: E402
+from live import Hub  # noqa: E402
+from config import EDIT_DATASET, REPO_ROOT, STATIC_DIR, Settings, lerobot_home, load_settings, save_settings  # noqa: E402
+from preflight import run_checks  # noqa: E402
+from procs import AgentError, Controls, ProcBusy, agent_call, read_token, save_token  # noqa: E402
+from recorder import Recorder, RecorderBusy, load_history  # noqa: E402
+from upload import UploadJob  # noqa: E402
 
 recorder = Recorder()
+uploader = UploadJob()
 controls = Controls()
 camera_feed = CameraFeed()
 
@@ -73,54 +81,62 @@ def _preflight() -> dict:
             c.update(status="warn", detail="The robot host is starting on the Jetson…", hint="", action="")
         elif c["action"] == "start_host" and not read_token():
             c.update(action="setup_jetson", hint="Connect the panel to the Jetson on the Robot page, then start the host there.")
+    checks.append(_collection_check())
     return {"checks": checks, "checked_at": time.time()}
+
+
+def _collection_check() -> dict:
+    """The plan (collection.yaml) must load and the shared dataset must be safe to append to."""
+    base = {"id": "collection", "label": "Data plan and shared dataset", "action": ""}
+    try:
+        cfg = collection.load_config()
+    except collection.ConfigError as e:
+        return {**base, "status": "fail", "detail": str(e), "hint": "Fix examples/alohamini/collection.yaml and restart the panel."}
+    root = lerobot_home() / cfg.dataset
+    if recorder.recording_dataset() or not (root / "meta" / "info.json").exists():
+        return {**base, "status": "ok", "detail": f"{cfg.dataset} ({'being recorded' if recorder.recording_dataset() else 'will be created'})", "hint": ""}
+    if problems := collection.validate_dataset(root):
+        return {**base, "status": "fail", "detail": "; ".join(problems)[:300],
+                "hint": "The shared dataset has a damaged file (probably from a crash). Do not record until it is repaired."}  # fmt: skip
+    return {**base, "status": "ok", "detail": cfg.dataset, "hint": ""}
 
 
 # ---------- recording ----------
 
 
 class StartRequest(BaseModel):
-    operator: str = Field(default="", max_length=60)
-    dataset: str
-    task: str = Field(min_length=3, max_length=500)
-    num_episodes: int = Field(ge=1, le=500)
-    episode_time_s: int = Field(ge=3, le=3600)
-    reset_time_s: int = Field(ge=0, le=600)
-    fps: int = Field(ge=1, le=120)
+    operator: str = Field(max_length=60)
+    episode_time_s: int = Field(ge=3, le=600)
 
 
 @app.post("/api/recorder/start")
 def start_recording(req: StartRequest) -> dict:
-    if not dataset_store.valid_repo_id(req.dataset):
-        raise HTTPException(400, "Dataset name must look like namespace/name (letters, digits, _ . -)")
-    if job.running and job.repo_id == req.dataset:
-        raise HTTPException(409, "This dataset is being edited right now; wait for it to finish.")
-    resume = dataset_store.dataset_exists(req.dataset)
-    fps = req.fps
-    if resume:
-        # Appending must keep the dataset's original frame rate.
-        fps = dataset_store.summarize(req.dataset, dataset_store.dataset_root(req.dataset), with_size=False)["fps"]
+    operator = " ".join(req.operator.split())
+    if not operator:
+        raise HTTPException(400, "Enter your name: it is saved with every episode you record.")
+    try:
+        cfg = collection.load_config()
+    except collection.ConfigError as e:
+        raise HTTPException(409, str(e)) from e
+    if job.running and job.repo_id == cfg.dataset:
+        raise HTTPException(409, "The dataset is being edited right now; wait for it to finish.")
+    if uploader.running:
+        raise HTTPException(409, "An upload is running; wait for it to finish before recording.")
+    root = lerobot_home() / cfg.dataset
+    if (root / "meta" / "info.json").exists() and (problems := collection.validate_dataset(root)):
+        raise HTTPException(409, "The shared dataset is damaged: " + "; ".join(problems)[:300])
     if users := controls.leader_users():
         raise HTTPException(409, f"{users[0]} is using the leader arms. Stop it on the Robot page first.")
     try:
-        session = recorder.start(
-            settings=load_settings(),
-            operator=req.operator.strip(),
-            dataset=req.dataset,
-            task=req.task.strip(),
-            num_episodes=req.num_episodes,
-            episode_time_s=req.episode_time_s,
-            reset_time_s=req.reset_time_s,
-            fps=fps,
-            resume=resume,
-        )
+        session = recorder.start(settings=load_settings(), operator=operator, episode_time_s=req.episode_time_s)
     except RecorderBusy as e:
         raise HTTPException(409, str(e)) from e
-    return {"id": session.id, "resume": resume}
+    return {"id": session.id}
 
 
 class ControlRequest(BaseModel):
-    action: str = Field(pattern="^(next|rerecord|stop|discard_stop|abort)$")
+    action: str = Field(pattern="^(start|done|save|discard|rerecord|finish|set_task|abort)$")
+    task_id: str | None = Field(default=None, max_length=64)
 
 
 @app.post("/api/recorder/control")
@@ -128,9 +144,14 @@ def control(req: ControlRequest) -> dict:
     try:
         if req.action == "abort":
             recorder.abort()
+        elif req.action == "set_task":
+            # Tasks are only ever chosen from the configured list; free text cannot get through.
+            if req.task_id not in {t.id for t in collection.load_config().tasks}:
+                raise HTTPException(400, "Unknown task")
+            recorder.command("set_task", task_id=req.task_id)
         else:
-            recorder.send_control(req.action)
-    except RuntimeError as e:
+            recorder.command(req.action)
+    except (RuntimeError, collection.ConfigError) as e:
         raise HTTPException(409, str(e)) from e
     return {"ok": True}
 
@@ -143,6 +164,58 @@ def recorder_state(since: int = 0) -> dict:
 @app.get("/api/history")
 def history() -> list[dict]:
     return load_history()
+
+
+@app.get("/api/collection")
+def collection_state() -> dict:
+    """The plan, how many episodes each task has (read from the dataset), and which task is furthest behind."""
+    try:
+        cfg = collection.load_config()
+    except collection.ConfigError as e:
+        return {"error": str(e)}
+    root = lerobot_home() / cfg.dataset
+    exists = (root / "meta" / "info.json").exists()
+    problems: list[str] = []
+    counts = recorder.live_counts()  # mid-session the files on disk are still being written
+    if counts is None:
+        counts = {t.id: 0 for t in cfg.tasks}
+        if exists:
+            problems = collection.validate_dataset(root)
+            if not problems:
+                counts = collection.task_counts(root, cfg)
+    flagged: dict[str, int] = {}
+    for rec in collection.read_records(root) if exists else []:
+        if rec.get("flagged"):
+            flagged[rec.get("task_id", "?")] = flagged.get(rec.get("task_id", "?"), 0) + 1
+    total = sum(v for k, v in counts.items())
+    return {
+        "config": cfg.public(),
+        "counts": counts,
+        "flagged": flagged,
+        "total_episodes": total,
+        "suggested_task_id": collection.suggest_task(counts, cfg),
+        "exists": exists,
+        "problems": problems,
+    }
+
+
+class UploadRequest(BaseModel):
+    method: str = Field(pattern="^(hub|rsync)$")
+    dry_run: bool = False
+    operator: str = Field(default="", max_length=60)
+
+
+@app.post("/api/upload/start")
+def upload_start(req: UploadRequest) -> dict:
+    if recorder.recording_dataset():
+        raise HTTPException(409, "A recording is running. Finish it before uploading.")
+    if job.running:
+        raise HTTPException(409, "The dataset is being edited right now; wait for it to finish.")
+    try:
+        uploader.start(req.method, req.dry_run, " ".join(req.operator.split()))
+    except (RuntimeError, collection.ConfigError) as e:
+        raise HTTPException(409, str(e)) from e
+    return {"ok": True}
 
 
 # ---------- robot: Jetson host, teleoperation, calibration ----------
@@ -344,6 +417,8 @@ hub.topic("host", 0.25, host_telemetry)
 hub.topic("cameras", 1.0, cameras)
 hub.topic("preflight", 5.0, _preflight)
 hub.topic("job", 1.0, lambda: job.snapshot())
+hub.topic("collection", 2.0, collection_state)
+hub.topic("upload", 1.0, uploader.snapshot)
 hub.family("proc", 0.4, _proc_snapshot, lambda name: name in controls.procs)
 
 
@@ -456,9 +531,9 @@ class EditJob:
             "--operation.type", "delete_episodes",
             "--operation.episode_indices", "[" + ", ".join(map(str, episodes)) + "]",
         ]  # fmt: skip
-        threading.Thread(target=self._run, args=(cmd,), daemon=True).start()
+        threading.Thread(target=self._run, args=(cmd, repo_id, episodes), daemon=True).start()
 
-    def _run(self, cmd: list[str]) -> None:
+    def _run(self, cmd: list[str], repo_id: str, episodes: list[int]) -> None:
         try:
             proc = subprocess.Popen(
                 cmd, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -468,6 +543,11 @@ class EditJob:
                 self.output = (self.output + [line.rstrip()])[-200:]
             code = proc.wait()
             self.status = "done" if code == 0 else "failed"
+            if code == 0:
+                # The tool rebuilds the dataset (renumbering episodes) and leaves the original as <name>_old:
+                # bring our per-episode metadata across, aligned to the new numbering.
+                root = lerobot_home() / repo_id
+                collection.carry_records_after_delete(root.with_name(root.name + "_old"), root, episodes)
         except OSError as e:
             self.output.append(str(e))
             self.status = "failed"

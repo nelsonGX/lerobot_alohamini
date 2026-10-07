@@ -22,7 +22,7 @@ export function HistoryCard({ history }: { history: HistoryEntry[] | null }) {
                   {h.dataset}
                 </Link>
                 <div className="text-xs text-ink-2">
-                  {h.episodes_saved} saved{h.episodes_discarded > 0 && `, ${h.episodes_discarded} discarded`}
+                  {h.episodes_saved} saved{h.episodes_discarded > 0 && `, ${h.episodes_discarded} discarded`}{!!h.episodes_flagged && `, ${h.episodes_flagged} flagged`}
                   {h.ended_at && ` · ${fmtDuration(h.ended_at - h.started_at)}`}
                 </div>
                 <div className="text-xs text-muted">

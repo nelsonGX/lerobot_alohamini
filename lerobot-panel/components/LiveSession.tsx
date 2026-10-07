@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, type Phase, type Session } from "@/lib/api";
+import { api, type CollectionConfig, type ControlAction, type EngineState, type Phase, type Session } from "@/lib/api";
 import { fmtDuration } from "@/lib/format";
 import { useLocalStorage } from "@/lib/hooks";
+import { HealthStrip } from "./HealthStrip";
+import { LayoutDiagram } from "./LayoutDiagram";
 import { PHASE_META } from "./phase";
+import { TaskProgress } from "./TaskProgress";
 import { Button, Card, ErrorBox, Kbd, LinkButton, Modal, Spinner, StatusIcon, Toggle } from "./ui";
-
-type Action = "next" | "rerecord" | "stop" | "discard_stop" | "abort";
 
 function speak(text: string) {
   try {
@@ -18,39 +19,49 @@ function speak(text: string) {
   }
 }
 
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/** What to say when a new episode is set up: the operator is looking at the table, not the screen. */
+function readyCue(st: EngineState): string {
+  const slots = st.layout ? Object.entries(st.layout.names).map(([slot, name]) => `${slot}: ${name}`).join(", ") : "";
+  return `Episode ${st.episode_number ?? ""}. ${st.task_text ?? ""}. Place the objects. ${slots}`;
+}
+
 export function LiveSession({
   session: s,
   log,
+  config,
   onNewSession,
-  onRecordMore,
 }: {
   session: Session;
   log: { id: number; text: string }[];
+  config: CollectionConfig | null;
   onNewSession: () => void;
-  onRecordMore: () => void;
 }) {
-  const meta = PHASE_META[s.phase];
+  const st = s.state;
+  const phase: Phase = s.phase;
+  const meta = PHASE_META[phase];
   const [voice, setVoice] = useLocalStorage("panel.voice", true);
-  const [pending, setPending] = useState<Action | null>(null);
+  const [pending, setPending] = useState<ControlAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmAbort, setConfirmAbort] = useState(false);
   const [showLog, setShowLog] = useState(false);
-  const controllable = s.phase === "recording" || s.phase === "resetting";
 
-  // Voice cues: the operator is looking at the robot, not the screen.
+  // Voice cues on phase changes and when a new episode is set up.
   const prev = useRef<{ phase: Phase; episode: number | null } | null>(null);
   useEffect(() => {
     const p = prev.current;
-    prev.current = { phase: s.phase, episode: s.episode };
-    if (!voice || !p || (p.phase === s.phase && p.episode === s.episode)) return;
-    if (s.phase === "recording") speak(`Recording episode ${s.episode ?? ""}`);
-    else if (s.phase === "resetting" && p.phase === "recording") speak("Reset the scene");
-    else if (s.phase === "done") speak("Session complete");
-    else if (s.phase === "failed") speak("Recording failed");
-  }, [s.phase, s.episode, voice]);
+    prev.current = { phase, episode: st?.episode_number ?? null };
+    if (!voice || !st || !p || (p.phase === phase && p.episode === st.episode_number)) return;
+    if (phase === "ready") speak(readyCue(st));
+    else if (phase === "recording") speak("Recording");
+    else if (phase === "review") speak(st.review?.recommend === "discard" ? "Check this episode. It may be bad." : "Review. Save or discard.");
+    else if (phase === "done") speak("Session complete");
+    else if (phase === "failed") speak("Recording failed");
+  }, [phase, st, voice]);
 
   // Clear the "sent" state once the recorder reacts (or after a timeout).
-  const stepKey = `${s.phase}:${s.episode}`;
+  const stepKey = `${phase}:${st?.episode_number}:${st?.attempt}`;
   const [lastStep, setLastStep] = useState(stepKey);
   if (lastStep !== stepKey) {
     setLastStep(stepKey);
@@ -62,144 +73,79 @@ export function LiveSession({
     return () => clearTimeout(t);
   }, [pending]);
 
-  const send = async (action: Action) => {
+  const send = async (action: ControlAction, taskId?: string) => {
     setError(null);
-    setPending(action);
+    if (action !== "set_task") setPending(action);
     try {
-      await api.control(action);
+      await api.control(action, taskId);
     } catch (e) {
       setPending(null);
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  // Keyboard shortcuts mirror the terminal ones: N next, R re-record, Q stop.
+  // Keyboard: Space starts/ends an episode; once it is in review, S saves, R re-records, D discards.
+  // Throwing data away is never one key during recording.
   const sendRef = useRef(send);
   useEffect(() => {
     sendRef.current = send;
   });
   useEffect(() => {
-    if (!controllable) return;
+    if (!s.active) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (e.metaKey || e.ctrlKey || e.altKey || t.closest("input, textarea, select, [contenteditable]")) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.repeat || t.closest("input, textarea, select, button, [contenteditable]")) return;
       const k = e.key.toLowerCase();
-      if (k === "n" || e.key === "ArrowRight") sendRef.current("next");
-      else if (k === "r" || e.key === "ArrowLeft") sendRef.current("rerecord");
-      else if (k === "q") sendRef.current("stop");
+      if (k === " " && phase === "ready") sendRef.current("start");
+      else if (k === " " && phase === "recording") sendRef.current("done");
+      else if (phase === "review" && k === "s") sendRef.current("save");
+      else if (phase === "review" && k === "r") sendRef.current("rerecord");
+      else if (phase === "review" && k === "d") sendRef.current("discard");
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [controllable]);
+  }, [s.active, phase]);
 
-  const total = s.phase === "recording" ? s.episode_time_s : s.phase === "resetting" ? s.reset_time_s : null;
-  const progress = total && s.remaining_s != null ? 1 - s.remaining_s / Math.max(total, 1) : null;
-  const fpsLow = s.live_fps != null && s.live_fps < s.fps * 0.9;
-  const discarded = s.episodes.filter((e) => e.status === "discarded").length;
-
-  const kept = s.episodes.filter((e) => e.status !== "discarded");
-  const slots = Math.max(s.num_episodes, kept.length);
-  const lastLive = kept.at(-1) && ["recording", "resetting", "saving"].includes(kept.at(-1)!.status);
-  const curIdx = lastLive ? kept.length - 1 : kept.length;
-  const pad = (n: number) => String(n).padStart(2, "0");
+  const objects = config?.objects ?? [];
+  const slots = config?.slots ?? Object.keys(st?.layout?.names ?? {});
+  const busy = !!pending;
 
   return (
     <div className="grid gap-6">
-      {/* The stage: one screen with everything the operator needs, no boxes */}
       <section className="border-y border-line">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line py-3">
           <span className="flex items-center gap-2 font-mono text-sm font-semibold uppercase tracking-wider">
-            <span className={`size-2.5 rounded-full ${s.phase === "recording" ? "pulse-dot" : ""}`} style={{ background: meta.color }} aria-hidden />
+            <span className={`size-2.5 rounded-full ${phase === "recording" ? "pulse-dot" : ""}`} style={{ background: meta.color }} aria-hidden />
             {meta.label}
           </span>
-          {s.episode != null && s.active && (
-            <span className="tabular font-mono text-sm text-muted">
-              EP {pad(s.episode)}/{pad(s.num_episodes)}
-            </span>
-          )}
-          <span className="ml-auto text-sm text-ink-2">{meta.description}</span>
-        </div>
-
-        <div className="grid gap-8 py-8 md:grid-cols-[1fr_20rem] md:gap-12 md:py-12">
-          <div className="min-w-0">
-            {s.active && s.remaining_s != null ? (
-              <>
-                <div className="tabular font-mono text-[clamp(5rem,16vw,11rem)] font-medium leading-[0.85] tracking-tighter">
-                  {pad(s.remaining_s)}
-                  <span className="ml-2 text-[0.22em] tracking-normal text-muted">sec</span>
-                </div>
-                <div className="eyebrow mt-4">{s.phase === "recording" ? "until episode auto-ends" : "until next episode"}</div>
-              </>
-            ) : (
-              <div className="font-mono text-6xl font-medium tracking-tighter text-ink-2">{meta.label}</div>
-            )}
-          </div>
-
-          <dl className="self-end font-mono text-sm">
-            <Row k="Dataset" v={`${s.dataset}${s.resume ? " +" : ""}`} />
-            <Row k="Task" v={s.task} />
-            <Row k="Operator" v={s.operator || "—"} />
-            <Row k="Capture" v={s.live_fps != null ? `${s.live_fps.toFixed(1)} / ${s.fps} fps` : "–"} bad={fpsLow} />
-            <Row k="Elapsed" v={fmtDuration((s.ended_at ?? s.now) - s.started_at)} />
-            <Row k="Discarded" v={String(discarded)} />
-          </dl>
-        </div>
-
-        {/* Timeline: one segment per episode; the live one fills with the countdown */}
-        <div className="pb-6">
-          <ul className="flex gap-1.5" aria-label="Episode progress">
-            {Array.from({ length: slots }, (_, i) => {
-              const st = kept[i]?.status;
-              const cur = s.active && i === curIdx;
-              return (
-                <li key={i} className="h-2 flex-1 overflow-hidden rounded-[2px] bg-surface-2" title={`Episode ${i + 1}`}>
-                  <div
-                    className="h-full transition-[width] duration-500 ease-linear"
-                    style={{
-                      width: st === "saved" ? "100%" : cur ? `${(progress ?? 0) * 100}%` : "0%",
-                      background: cur ? meta.color : "var(--ink)",
-                    }}
-                  />
-                </li>
-              );
-            })}
-          </ul>
-          <div className="eyebrow mt-2 flex justify-between">
-            <span>{s.saved_count} of {s.num_episodes} saved</span>
-            {s.stop_requested && <span>finishing after this step…</span>}
-          </div>
+          {st?.episode_number != null && s.active && <span className="tabular font-mono text-sm text-muted">EPISODE {st.episode_number}</span>}
+          {st?.simulated && <span className="rounded bg-warn/20 px-1.5 py-0.5 text-[11px] font-semibold text-warn-ink">SIMULATION</span>}
+          <span className="ml-auto text-sm text-ink-2">{st?.message || meta.description}</span>
         </div>
 
         {s.active && (
-          <div className="flex flex-wrap items-stretch gap-3 border-t border-line py-5">
-            {s.phase === "recording" || s.phase === "resetting" ? (
-              <>
-                <Button variant="primary" size="lg" className="h-16 min-w-72 flex-1 text-lg md:flex-none" disabled={!!pending} loading={pending === "next"} onClick={() => send("next")}>
-                  {s.phase === "recording" ? "Done — save episode" : "Scene reset — start next"} <Kbd>N</Kbd>
-                </Button>
-                <Button size="lg" className="h-16" disabled={!!pending} loading={pending === "rerecord"} onClick={() => send("rerecord")}>
-                  {s.phase === "recording" ? "Redo" : `Discard #${s.episode} & redo`} <Kbd>R</Kbd>
-                </Button>
-              </>
-            ) : (
-              <p className="self-center text-sm text-muted">Controls unlock when recording or resetting.</p>
-            )}
-            <div className="ml-auto flex flex-wrap items-center gap-2 self-center">
-              <Toggle size="sm" checked={voice} onChange={setVoice} label="Voice" />
-              <Button size="sm" variant="ghost" disabled={!controllable || !!pending} loading={pending === "stop"} onClick={() => send("stop")}>
-                Save &amp; finish <Kbd>Q</Kbd>
-              </Button>
-              <Button size="sm" variant="ghost" disabled={!controllable || !!pending} loading={pending === "discard_stop"} onClick={() => send("discard_stop")}>
-                Discard &amp; finish
-              </Button>
-              <Button size="sm" variant="ghost" className="text-critical-ink" onClick={() => setConfirmAbort(true)}>
-                Force stop
-              </Button>
-            </div>
+          <div className="border-b border-line py-3">
+            <HealthStrip health={st?.health ?? null} />
           </div>
         )}
+
+        {s.active && st && (phase === "ready" || phase === "recording" || phase === "review") && (
+          <div className="py-6 md:py-8">
+            {phase === "ready" && <Ready st={st} objects={objects} slots={slots} onTask={(id) => send("set_task", id)} onStart={() => send("start")} busy={busy} />}
+            {phase === "recording" && <Recording st={st} objects={objects} slots={slots} busy={busy} pending={pending} onSend={send} />}
+            {phase === "review" && <Review st={st} busy={busy} pending={pending} onSend={send} />}
+          </div>
+        )}
+
+        {s.active && (!st || !["ready", "recording", "review"].includes(phase)) && (
+          <div className="flex items-center gap-3 py-12 text-ink-2">
+            <Spinner className="size-5" />
+            <span className="font-mono text-lg">{meta.description}</span>
+          </div>
+        )}
+
         {(pending || error) && (
           <div className="border-t border-line py-3">
             {pending && (
@@ -210,39 +156,24 @@ export function LiveSession({
             {error && <ErrorBox>{error}</ErrorBox>}
           </div>
         )}
+
+        {s.active && st && (
+          <div className="flex flex-wrap items-center gap-3 border-t border-line py-3">
+            <SessionChips st={st} />
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <Toggle size="sm" checked={voice} onChange={setVoice} label="Voice" />
+              <Button size="sm" variant="ghost" disabled={phase !== "ready" || busy} loading={pending === "finish"} onClick={() => send("finish")} title={phase === "ready" ? undefined : "Save or discard the current episode first"}>
+                Finish session
+              </Button>
+              <Button size="sm" variant="ghost" className="text-critical-ink" onClick={() => setConfirmAbort(true)}>
+                Force stop
+              </Button>
+            </div>
+          </div>
+        )}
       </section>
 
-      {/* Result */}
-      {!s.active && (
-        <Card>
-          {s.phase === "done" ? (
-            <div className="flex flex-wrap items-center gap-4">
-              <StatusIcon status="ok" className="size-6" />
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold">Saved {s.saved_count} episode{s.saved_count === 1 ? "" : "s"} to {s.dataset}</div>
-                <div className="truncate text-xs text-muted">{s.dataset_path}</div>
-              </div>
-              <LinkButton variant="primary" href={`/datasets/view?repo=${encodeURIComponent(s.dataset)}`}>
-                Review episodes
-              </LinkButton>
-              <Button onClick={onRecordMore}>Record more</Button>
-              <Button variant="ghost" onClick={onNewSession}>New session</Button>
-            </div>
-          ) : (
-            <div className="grid gap-3">
-              <ErrorBox>
-                <div className="font-semibold">{s.error_hint ?? (s.phase === "aborted" ? "Recording was interrupted." : "The recorder stopped with an error.")}</div>
-                {s.saved_count > 0 && <div className="mt-1">{s.saved_count} episode(s) were saved before it stopped.</div>}
-              </ErrorBox>
-              {s.error && <pre className="max-h-56 overflow-auto rounded-lg bg-surface-2 p-3 text-xs">{s.error}</pre>}
-              <div className="flex gap-2">
-                <Button variant="primary" onClick={onRecordMore}>Try again</Button>
-                <Button variant="ghost" onClick={onNewSession}>Back to setup</Button>
-              </div>
-            </div>
-          )}
-        </Card>
-      )}
+      {!s.active && <Result s={s} onNewSession={onNewSession} />}
 
       <details className="border-b border-line text-sm" open={showLog} onToggle={(e) => setShowLog(e.currentTarget.open)}>
         <summary className="flex items-center gap-3 pb-3">
@@ -254,10 +185,10 @@ export function LiveSession({
         </div>
       </details>
 
-      <Modal open={confirmAbort} onClose={() => setConfirmAbort(false)} title="Force stop the recorder?">
+      <Modal open={confirmAbort} onClose={() => setConfirmAbort(false)} title="Force stop the session?">
         <p className="text-sm text-ink-2">
-          This interrupts the recorder like Ctrl+C. The current episode is lost and the dataset may not be finalized
-          properly. Prefer <b>Save &amp; finish session</b> unless the recorder is stuck.
+          The episode in progress is <b>discarded</b> (it is never saved half-way), the dataset is closed properly and the session ends. Episodes you
+          already saved are kept. Use <b>Finish session</b> instead unless the recorder is stuck.
         </p>
         <div className="mt-5 flex justify-end gap-2">
           <Button onClick={() => setConfirmAbort(false)}>Cancel</Button>
@@ -276,12 +207,160 @@ export function LiveSession({
   );
 }
 
-function Row({ k, v, bad }: { k: string; v: string; bad?: boolean }) {
+type Common = { st: EngineState; busy: boolean };
+type Send = (a: ControlAction, taskId?: string) => void;
+
+function Ready({ st, objects, slots, onTask, onStart, busy }: Common & { objects: CollectionConfig["objects"]; slots: string[]; onTask: (id: string) => void; onStart: () => void }) {
   return (
-    <div className="flex items-baseline justify-between gap-4 border-t border-line py-2 first:border-t-0">
-      <dt className="eyebrow shrink-0">{k}</dt>
-      <dd className={`tabular min-w-0 truncate ${bad ? "text-critical-ink" : ""}`} title={v}>{v}</dd>
+    <div className="grid gap-8 md:grid-cols-[1fr_minmax(0,22rem)]">
+      <div>
+        <div className="eyebrow mb-3">1 · Place the objects like this</div>
+        {st.layout && <LayoutDiagram layout={st.layout} objects={objects} slots={slots} />}
+        {st.attempt > 1 && <p className="mt-3 text-xs text-muted">Same layout as the episode you just redid (attempt {st.attempt}).</p>}
+      </div>
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] content-start gap-4">
+        <div>
+          <div className="eyebrow mb-3">2 · Task for this episode</div>
+          <TaskProgress tasks={st.tasks} suggestedId={st.suggested_task_id} selectedId={st.task_id} onSelect={onTask} />
+        </div>
+        <Button variant="danger" size="lg" className="h-16 text-lg" disabled={busy || !st.task_id} onClick={onStart}>
+          <span className="size-3 rounded-full bg-white" /> Start recording <Kbd>Space</Kbd>
+        </Button>
+        <p className="text-xs text-muted">Press it once the objects are placed like the picture. The arms follow the leader arms now, but nothing is recorded until you start.</p>
+      </div>
     </div>
+  );
+}
+
+function Recording({ st, objects, slots, busy, pending, onSend }: Common & { objects: CollectionConfig["objects"]; slots: string[]; pending: ControlAction | null; onSend: Send }) {
+  const remaining = st.remaining_s ?? st.episode_time_s;
+  const progress = 1 - remaining / Math.max(st.episode_time_s, 1);
+  return (
+    <div className="grid gap-8 md:grid-cols-[1fr_20rem] md:gap-12">
+      <div className="min-w-0">
+        <div className="tabular font-mono text-[clamp(5rem,16vw,11rem)] font-medium leading-[0.85] tracking-tighter">
+          {pad(remaining)}
+          <span className="ml-2 text-[0.22em] tracking-normal text-muted">sec</span>
+        </div>
+        <div className="eyebrow mt-4">until the episode ends by itself</div>
+        <div className="mt-4 h-2 overflow-hidden rounded-[2px] bg-surface-2">
+          <div className="h-full transition-[width] duration-500 ease-linear" style={{ width: `${progress * 100}%`, background: "var(--critical)" }} />
+        </div>
+        <div className="mt-6 flex flex-wrap items-stretch gap-3">
+          <Button variant="primary" size="lg" className="h-16 min-w-72 flex-1 text-lg md:flex-none" disabled={busy} loading={pending === "done"} onClick={() => onSend("done")}>
+            Done — task finished <Kbd>Space</Kbd>
+          </Button>
+          <Button size="lg" className="h-16" disabled={busy} loading={pending === "rerecord"} onClick={() => onSend("rerecord")} title="Throw this recording away and redo the same task and layout">
+            Re-record
+          </Button>
+          <Button size="lg" className="h-16" disabled={busy} loading={pending === "discard"} onClick={() => onSend("discard")} title="Throw this recording away and move on to a new layout">
+            Discard
+          </Button>
+        </div>
+      </div>
+      <div className="grid content-start gap-4 self-end">
+        <div className="font-mono text-sm">{st.task_text}</div>
+        {st.layout && <LayoutDiagram layout={st.layout} objects={objects} slots={slots} size="sm" />}
+      </div>
+    </div>
+  );
+}
+
+function Review({ st, busy, pending, onSend }: Common & { pending: ControlAction | null; onSend: Send }) {
+  const r = st.review;
+  const recommend = r?.recommend ?? "save";
+  const stats = r?.stats;
+  return (
+    <div className="grid gap-5 md:max-w-2xl">
+      <div>
+        <div className="text-lg font-semibold">Keep this episode?</div>
+        <div className="mt-1 text-sm text-ink-2">
+          {st.task_text}
+          {stats && (
+            <span className="tabular font-mono text-xs text-muted">
+              {" "}
+              · {fmtDuration(stats.duration_s)} · {stats.frames} frames{stats.fps != null && ` · ${stats.fps.toFixed(1)} fps`}
+            </span>
+          )}
+        </div>
+      </div>
+      <ul className="grid gap-2" aria-label="Automatic checks">
+        {r && r.flags.length === 0 && (
+          <li className="flex items-center gap-2 text-sm">
+            <StatusIcon status="ok" /> No problems detected.
+          </li>
+        )}
+        {r?.flags.map((f) => (
+          <li key={f.code} className="flex items-start gap-2 text-sm">
+            <StatusIcon status={f.severity === "bad" ? "fail" : "warn"} className="mt-0.5" />
+            <span>{f.message}</span>
+          </li>
+        ))}
+      </ul>
+      {recommend === "discard" && <p className="text-sm font-medium text-critical-ink">Flagged as probably bad: discarding or re-recording is recommended.</p>}
+      <div className="flex flex-wrap items-stretch gap-3">
+        <Button variant={recommend === "save" ? "primary" : "secondary"} size="lg" className="h-16 min-w-52" disabled={busy} loading={pending === "save"} onClick={() => onSend("save")}>
+          Save episode <Kbd>S</Kbd>
+        </Button>
+        <Button variant={recommend === "discard" ? "primary" : "secondary"} size="lg" className="h-16" disabled={busy} loading={pending === "rerecord"} onClick={() => onSend("rerecord")} title="Throw it away and redo the same task and layout">
+          Re-record <Kbd>R</Kbd>
+        </Button>
+        <Button size="lg" className="h-16" disabled={busy} loading={pending === "discard"} onClick={() => onSend("discard")} title="Throw it away and move on to a new layout">
+          Discard <Kbd>D</Kbd>
+        </Button>
+      </div>
+      <p className="text-xs text-muted">The arms still follow the leader arms, so you can reset the scene while you decide. Nothing is written to the dataset until you press Save.</p>
+    </div>
+  );
+}
+
+function SessionChips({ st }: { st: EngineState }) {
+  const flagged = st.episodes.filter((e) => e.status === "saved" && e.flags.length > 0).length;
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs text-ink-2">
+      <span>{st.operator}</span>
+      <span>{st.saved} saved</span>
+      <span>{st.discarded} discarded</span>
+      {flagged > 0 && <span className="text-warn-ink">{flagged} flagged</span>}
+    </div>
+  );
+}
+
+function Result({ s, onNewSession }: { s: Session; onNewSession: () => void }) {
+  const flagged = s.state?.episodes.filter((e) => e.status === "saved" && e.flags.length > 0).length ?? 0;
+  return (
+    <Card>
+      {s.phase === "done" ? (
+        <div className="flex flex-wrap items-center gap-4">
+          <StatusIcon status="ok" className="size-6" />
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold">
+              Saved {s.saved_count} episode{s.saved_count === 1 ? "" : "s"} to {s.dataset}
+            </div>
+            <div className="text-xs text-muted">
+              {s.discarded_count} discarded{flagged > 0 && ` · ${flagged} saved with flags (review them in the dataset)`}
+            </div>
+          </div>
+          <LinkButton variant="primary" href={`/datasets/view?repo=${encodeURIComponent(s.dataset)}`}>
+            Review episodes
+          </LinkButton>
+          <Button onClick={onNewSession}>New session</Button>
+        </div>
+      ) : (
+        <div className="grid gap-3">
+          <ErrorBox>
+            <div className="font-semibold">{s.error_hint ?? (s.phase === "aborted" ? "The session was stopped." : "The recorder stopped with an error.")}</div>
+            {s.saved_count > 0 && <div className="mt-1">{s.saved_count} episode(s) were saved before it stopped.</div>}
+          </ErrorBox>
+          {s.error && <pre className="max-h-56 overflow-auto rounded-lg bg-surface-2 p-3 text-xs whitespace-pre-wrap">{s.error}</pre>}
+          <div className="flex gap-2">
+            <Button variant="primary" onClick={onNewSession}>
+              Back to setup
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

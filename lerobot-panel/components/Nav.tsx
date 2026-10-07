@@ -62,7 +62,7 @@ export function Nav() {
             >
               <span className={`size-2 rounded-full ${s.phase === "recording" ? "pulse-dot" : ""}`} style={{ background: meta.color }} />
               {meta.label}
-              {s.episode != null && <span className="tabular text-muted">ep {s.episode}</span>}
+              {s.state?.episode_number != null && <span className="tabular text-muted">ep {s.state.episode_number}</span>}
               <span className="hidden max-w-40 truncate text-muted md:inline">{s.dataset}</span>
             </Link>
           ) : (

@@ -32,6 +32,7 @@ def record_loop(
     single_task: str | None = None,
     timing_callback: Callable[[dict[str, float]], None] | None = None,
     display_data: bool = False,
+    frame_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """AlohaMini-specific bimanual recording loop with optional timing diagnostics."""
     if dataset is not None and dataset.fps != fps:
@@ -63,6 +64,7 @@ def record_loop(
             events["exit_early"] = False
             break
 
+        sequence_before = getattr(robot, "observation_sequence", None)
         obs = robot.get_observation()
         observation_done_t = time.perf_counter()
         for name, value_ms in getattr(robot, "logs", {}).get("observation_timing_ms", {}).items():
@@ -94,6 +96,16 @@ def record_loop(
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             dataset.add_frame({**observation_frame, **action_frame, "task": single_task})
         dataset_write_done_t = time.perf_counter()
+
+        if frame_callback is not None:
+            frame_callback(
+                {
+                    "fresh": sequence_before is None or robot.observation_sequence != sequence_before,
+                    "latency_s": getattr(robot, "last_observation_latency_s", None),
+                    "observation": obs_processed,
+                    "action": action_values,
+                }
+            )
 
         if display_data:
             log_visualization_data(

@@ -1,0 +1,46 @@
+# Data-collection plan for the "pick 1 of 3 objects by voice" dataset.
+# Used by the recording panel (./panel) and examples/alohamini/record_panel.py.
+# Edit this file, restart ./panel. Task strings are trained on verbatim: change them only before recording starts.
+
+# The ONE shared dataset everybody records into (created on first use, resumed afterwards).
+dataset: alohamini/pick_by_voice
+
+# Episodes wanted per task. The panel suggests the task that is furthest behind.
+default_target: 50
+
+# The three objects on the table. `color` only tints the layout picture shown to the operator.
+objects:
+  - {id: red_cube,  name: red cube,  color: "#d9453d"}
+  - {id: blue_ball, name: blue ball, color: "#3b7dd8"}
+  - {id: green_cup, name: green cup, color: "#3f9b5a"}
+
+# Where objects can sit, in the order shown on screen. Left/right are as seen from the robot's front camera.
+slots: [left, center, right]
+
+# The only task strings that can ever be recorded (one per object). Operators pick from this list.
+tasks:
+  - {id: pick_red_cube,  text: "pick up the red cube",  object: red_cube}
+  - {id: pick_blue_ball, text: "pick up the blue ball", object: blue_ball}
+  - {id: pick_green_cup, text: "pick up the green cup", object: green_cup}
+  # Per-task override of the target, e.g.: {id: ..., text: ..., object: ..., target: 80}
+
+# Episodes shorter/longer than these are flagged automatically after recording.
+quality:
+  min_episode_s: 3.0         # shorter than this: probably a mis-press
+  min_fps_ratio: 0.90        # mean capture rate below 90% of target
+  max_gap_s: 0.30            # any pause between two frames longer than this
+  max_stale_frac: 0.10       # share of loop iterations that had no new robot observation
+  max_latency_p95_s: 0.25    # 95th percentile of the observation round trip (warning only)
+  min_arm_motion: 2.0        # largest joint range over the episode; below = the arms never moved
+  black_camera_frac: 0.20    # share of frames where a camera image is (almost) black
+  time_limit_margin_s: 0.5   # ran into the time limit: the task may not have been finished (warning only)
+
+# How a finished dataset leaves this machine (Upload button on the Record page). Leave a method empty to hide it.
+upload:
+  hub_repo_id: ""            # e.g. my-org/pick_by_voice  (always created/kept PRIVATE; needs `hf auth login` or HF_TOKEN)
+  rsync_dest: ""             # e.g. gpu@10.0.0.5:/data/alohamini/pick_by_voice
+
+# Close and reopen the dataset after every N saved episodes. LeRobot only writes a parquet file's footer when the file
+# is closed, so with 0 (off) one crash or power cut makes the WHOLE session's episodes unreadable. With 1 (about 0.2 s
+# per save) an interrupted session can only ever lose the episode being saved at that moment. Keep it at 1.
+checkpoint_every: 1

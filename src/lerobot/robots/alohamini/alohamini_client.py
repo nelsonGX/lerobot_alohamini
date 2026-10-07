@@ -85,6 +85,7 @@ class AlohaMiniClient(Robot):
         # Callers can use this to distinguish a fresh remote frame from ``last_frames`` fallback.
         self._observation_sequence = 0
         self.latest_host_timing: dict = {}
+        self._last_observation_latency_s: float | None = None
         self.latest_robot_metadata: dict = {}
         self.latest_safety_status: dict = {}
         self._last_safety_received_at: float | None = None
@@ -149,6 +150,11 @@ class AlohaMiniClient(Robot):
     def observation_sequence(self) -> int:
         """Number of successfully received remote observations."""
         return self._observation_sequence
+
+    @property
+    def last_observation_latency_s(self) -> float | None:
+        """Seconds between requesting the latest received observation and receiving it (link health)."""
+        return self._last_observation_latency_s
 
     @property
     def is_calibrated(self) -> bool:
@@ -501,6 +507,7 @@ class AlohaMiniClient(Robot):
         self.latest_safety_status = dict(observation.get("_safety", {}))
         self._last_safety_received_at = time.monotonic() if self.latest_safety_status else None
         self._observation_sequence += 1
+        self._last_observation_latency_s = time.monotonic() - requested_at
         self._feedback_requested_at = requested_at
         self._feedback_valid = True
         observation_done_t = time.perf_counter()

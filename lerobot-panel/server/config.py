@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -11,9 +12,18 @@ from pydantic import BaseModel, Field
 
 PANEL_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = PANEL_DIR.parent
-DATA_DIR = PANEL_DIR / ".data"
+DATA_DIR = Path(os.environ["PANEL_DATA_DIR"]).expanduser() if os.environ.get("PANEL_DATA_DIR") else PANEL_DIR / ".data"
 STATIC_DIR = PANEL_DIR / "out"
-RECORD_SCRIPT = REPO_ROOT / "examples" / "alohamini" / "record_bi.py"
+EXAMPLES_DIR = REPO_ROOT / "examples" / "alohamini"
+RECORD_SCRIPT = EXAMPLES_DIR / "record_panel.py"
+UPLOAD_SCRIPT = EXAMPLES_DIR / "upload_dataset.py"
+SESSIONS_DIR = DATA_DIR / "sessions"
+# `PANEL_SIMULATE=1 ./panel` runs the whole flow on fake hardware (try the panel without the robot).
+SIMULATE = os.environ.get("PANEL_SIMULATE", "") not in ("", "0", "false")
+
+# collection.py is shared with the recording engine; it only needs numpy/pyarrow/yaml.
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(EXAMPLES_DIR))
 
 
 def _venv_bin(name: str) -> str:

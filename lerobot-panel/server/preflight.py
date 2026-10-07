@@ -8,7 +8,7 @@ import shutil
 import socket
 from pathlib import Path
 
-from config import LEADER_PORTS, calibration_home, lerobot_home, Settings
+from config import LEADER_PORTS, SIMULATE, calibration_home, lerobot_home, Settings
 
 # status: ok | warn | fail. "fail" blocks the Start button unless the user overrides.
 
@@ -54,10 +54,24 @@ def _child_pids(root_pid: int) -> set[int]:
     return pids
 
 
+def _disk_check() -> dict:
+    home = lerobot_home()
+    probe = home if home.exists() else home.parent if home.parent.exists() else Path.home()
+    free_gb = shutil.disk_usage(probe).free / 1e9
+    status = "ok" if free_gb > 20 else "warn" if free_gb > 5 else "fail"
+    return _check("disk", "Free disk space", status, f"{free_gb:.0f} GB free in {probe}",
+                  "" if status == "ok" else "Free up space or move old datasets off this machine.")  # fmt: skip
+
+
 def run_checks(settings: Settings, recorder_pid: int | None = None, panel_users: list[str] | None = None,
                panel_pids: set[int] | None = None) -> list[dict]:
     """panel_users/panel_pids: programs the panel itself runs on the leader arms (teleop, calibration)."""
     checks = []
+    if SIMULATE:  # PANEL_SIMULATE=1: no robot, no arms; only disk space matters
+        checks.append(_check("sim", "Simulation mode", "ok", "Fake robot and leader arms - nothing will move",
+                             "Unset PANEL_SIMULATE and restart ./panel to record with the real robot."))  # fmt: skip
+        checks.append(_disk_check())
+        return checks
     exclude = _child_pids(recorder_pid) if recorder_pid else set()
     for pid in panel_pids or ():
         exclude |= _child_pids(pid)
@@ -103,13 +117,7 @@ def run_checks(settings: Settings, recorder_pid: int | None = None, panel_users:
         checks.append(_check("jetson", label, "fail", f"Cannot reach {settings.jetson_ip} ({reason})",
                              "Check the Jetson is powered on, on the network, and the IP in Settings is right."))  # fmt: skip
 
-    # Disk space for videos
-    home = lerobot_home()
-    probe = home if home.exists() else home.parent if home.parent.exists() else Path.home()
-    free_gb = shutil.disk_usage(probe).free / 1e9
-    status = "ok" if free_gb > 20 else "warn" if free_gb > 5 else "fail"
-    checks.append(_check("disk", "Free disk space", status, f"{free_gb:.0f} GB free in {probe}",
-                         "" if status == "ok" else "Free up space or move old datasets off this machine."))  # fmt: skip
+    checks.append(_disk_check())
 
     # Python deps for recording
     missing_deps = [m for m in ("datasets", "av", "pyarrow") if importlib.util.find_spec(m) is None]

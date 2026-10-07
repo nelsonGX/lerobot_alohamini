@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { Suspense, useCallback, useState } from "react";
 import { CameraPreview } from "@/components/CameraPreview";
 import { HostMonitor } from "@/components/HostMonitor";
@@ -9,6 +9,7 @@ import { HistoryCard } from "@/components/HistoryCard";
 import { LiveSession } from "@/components/LiveSession";
 import { Preflight } from "@/components/Preflight";
 import { RecordForm } from "@/components/RecordForm";
+import { UploadCard } from "@/components/UploadCard";
 import { ErrorBox } from "@/components/ui";
 import { api, type Session } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
@@ -23,21 +24,15 @@ export default function RecordPage() {
 }
 
 function Record() {
-  const params = useSearchParams();
   const router = useRouter();
   const recorder = useTopic("recorder");
   const { data: state, error: backendError } = recorder;
   const log = useRecorderLog();
   const [dismissed, setDismissed] = useState<string | null>(null);
-  const [prefill, setPrefill] = useState<{ dataset?: string; task?: string; key: number }>(() => ({
-    dataset: params.get("dataset") ?? undefined,
-    task: params.get("task") ?? undefined,
-    key: 0,
-  }));
 
   const preflight = useTopic("preflight");
+  const collection = useTopic("collection").data;
   const settings = usePoll(api.settings, 30000);
-  const datasets = usePoll(api.datasets, 10000);
   const history = usePoll(api.history, 10000, [state?.session?.phase]);
   const [checking, setChecking] = useState(false);
   const recheck = useCallback(async () => {
@@ -52,15 +47,9 @@ function Record() {
     session && (session.active || (dismissed !== session.id && session.now - (session.ended_at ?? 0) < 1800));
   const blocked = !!preflight.data?.checks.some((c) => c.status === "fail");
 
-  const newSession = (withPrefill: boolean) => {
+  const newSession = () => {
     if (session) setDismissed(session.id);
-    setPrefill({
-      dataset: withPrefill ? session?.dataset : undefined,
-      task: withPrefill ? session?.task : undefined,
-      key: prefill.key + 1,
-    });
     router.replace("/");
-    datasets.refresh();
   };
 
   const live = !!showSession;
@@ -100,25 +89,13 @@ function Record() {
           {!state ? (
             <p className="text-sm text-muted">Loading…</p>
           ) : showSession ? (
-            <LiveSession
-              session={session}
-              log={log}
-              onNewSession={() => newSession(false)}
-              onRecordMore={() => newSession(true)}
-            />
+            <LiveSession session={session} log={log} config={collection?.config ?? null} onNewSession={newSession} />
           ) : (
-            <RecordForm
-              key={prefill.key}
-              settings={settings.data}
-              datasets={datasets.data?.datasets ?? []}
-              blocked={blocked}
-              initialDataset={prefill.dataset}
-              initialTask={prefill.task}
-              onStarted={() => void recorder.refresh()}
-            />
+            <RecordForm settings={settings.data} collection={collection} blocked={blocked} onStarted={() => void recorder.refresh()} />
           )}
         </div>
         {live && session?.active && <HostMonitor />}
+        {!session?.active && <UploadCard collection={collection} recording={false} />}
         {/* Mid-session the operator needs the controls, not setup: checks and history fold away. */}
         {live && checks}
       </div>
@@ -145,13 +122,17 @@ function HowTo() {
           Make sure the robot host is running (<Link href="/robot" className="text-accent hover:underline">Robot</Link> page) and both
           leader arms are plugged in here.
         </li>
-        <li>Fill in the dataset and task, then press <b>Start recording</b>.</li>
+        <li>Enter your name and press <b>Start session</b>.</li>
         <li>
-          When it says <b>Recording</b>, do the task with the leader arms. Press <b>N</b> when done (or wait for the timer).
+          For each episode the screen shows a <b>layout</b> and the <b>task</b> that is furthest behind. Place the objects like the picture,
+          then press <b>Start recording</b>.
         </li>
-        <li>During <b>Reset</b>, put objects back. Press <b>N</b> to start the next episode right away.</li>
-        <li>Made a mistake? Press <b>R</b> any time before the next episode starts to throw that episode away.</li>
-        <li>Afterwards, open the dataset to review each episode and delete bad ones.</li>
+        <li>Do the task with the leader arms. Press <b>Done</b> when finished (or wait for the timer).</li>
+        <li>
+          <b>Review</b>: nothing is saved yet. <b>Save</b> keeps it, <b>Re-record</b> throws it away and repeats the same layout,
+          <b> Discard</b> throws it away and moves on. Episodes flagged as bad say why.
+        </li>
+        <li>When you are done, press <b>Finish session</b>, then <b>Upload dataset</b>.</li>
       </ol>
     </details>
   );
