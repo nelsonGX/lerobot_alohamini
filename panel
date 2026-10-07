@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Web panel for recording and reviewing datasets (run on the machine with the leader arms).
+# Usage: ./panel [--rebuild]      then open http://<this-machine>:8000
+#   PANEL_PORT=8080 ./panel       use another port
+#   JETSON_IP=...                 initial Jetson IP (can be changed in the panel's settings)
+set -euo pipefail
+cd "$(dirname "$0")"
+PORT="${PANEL_PORT:-8000}"
+
+if [[ "${1:-}" == "--rebuild" || ! -f lerobot-panel/out/index.html ]]; then
+  echo "Building the panel UI..."
+  (cd lerobot-panel && { [[ -d node_modules ]] || npm ci; } && npm run build)
+fi
+
+echo "Panel: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT  (Ctrl+C to stop)"
+exec uv run --with 'fastapi>=0.115' --with 'uvicorn[standard]>=0.30' \
+  uvicorn --app-dir lerobot-panel/server main:app --host 0.0.0.0 --port "$PORT"

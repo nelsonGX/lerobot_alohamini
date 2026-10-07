@@ -208,8 +208,12 @@ def main():
 
     listener, events = init_keyboard_listener()
 
-    if not robot.is_connected or not leader_arm.is_connected or not keyboard.is_connected:
+    if not robot.is_connected or not leader_arm.is_connected:
         raise ValueError("Robot or teleop is not connected!")
+    if not keyboard.is_connected:
+        # Headless (e.g. launched from the web panel): episode controls still work through
+        # the terminal listener; only base/lift keyboard teleop is unavailable.
+        print("Keyboard unavailable: base and lift keyboard control disabled.", flush=True)
     if args.display_data:
         init_visualization("rerun", session_name="alohamini_record")
     recorded_episodes = 0

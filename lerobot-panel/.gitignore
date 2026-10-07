@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# panel runtime state (settings, session history)
+/.data/
+__pycache__/
