@@ -228,6 +228,30 @@ def suggest_task(counts: dict[str, int], cfg: CollectionConfig) -> str | None:
     return min(behind)[3] if behind else None
 
 
+TASK_MODES = ("rotate", "single")
+
+
+def next_task(
+    mode: str, counts: dict[str, int], cfg: CollectionConfig, last_saved: str | None = None
+) -> str | None:
+    """Which task comes next.
+
+    rotate: the task after the last saved one, in plan order, wrapping around (red -> green -> blue -> red ...);
+            tasks that reached their target are skipped while others are still open.
+    single: the first task in plan order that has not reached its target, repeated until it has (red x50 -> green x50 ...).
+    When every task is at its target, rotate keeps rotating and single stays on the last task. None only if there are no tasks.
+    """
+    ids = [t.id for t in cfg.tasks]
+    if not ids:
+        return None
+    open_ids = [t.id for t in cfg.tasks if counts.get(t.id, 0) < t.target]
+    if mode == "single":
+        return open_ids[0] if open_ids else ids[-1]
+    start = ids.index(last_saved) + 1 if last_saved in ids else 0
+    order = [ids[(start + i) % len(ids)] for i in range(len(ids))]
+    return next((i for i in order if i in open_ids), order[0])
+
+
 # ---------------------------------------------------------------- layouts
 
 

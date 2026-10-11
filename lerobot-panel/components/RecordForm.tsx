@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { api, type CollectionState, type Settings } from "@/lib/api";
+import { api, type CollectionState, type Settings, type TaskMode } from "@/lib/api";
 import { useLocalStorage } from "@/lib/hooks";
 import { TaskProgress } from "./TaskProgress";
 import { Button, Card, ErrorBox, Field, inputClass, NumberInput } from "./ui";
@@ -19,6 +19,10 @@ export function RecordForm({
 }) {
   const [operator, setOperator] = useLocalStorage("panel.operator", "");
   const [episodeTime, setEpisodeTime] = useState(60);
+  const [taskMode, setTaskMode] = useLocalStorage<TaskMode>("panel.taskMode", "rotate");
+  const [auto, setAuto] = useLocalStorage("panel.auto", true);
+  const [autoStart, setAutoStart] = useLocalStorage("panel.autoStartS", 8);
+  const [autoSave, setAutoSave] = useLocalStorage("panel.autoSaveS", 3);
   const [override, setOverride] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -49,7 +53,7 @@ export function RecordForm({
     setError(null);
     setStarting(true);
     try {
-      await api.start({ operator: name, episode_time_s: episodeTime });
+      await api.start({ operator: name, episode_time_s: episodeTime, task_mode: taskMode, auto_start_s: auto ? autoStart : 0, auto_save_s: auto ? autoSave : 0 });
       onStarted();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -97,14 +101,34 @@ export function RecordForm({
               </span>
               <span className="text-xs text-muted">{collection.exists ? "all sessions are added to this dataset" : "it will be created on first save"}</span>
             </div>
-            <TaskProgress tasks={cfg.tasks.map((t) => ({ ...t, count: collection.counts[t.id] ?? 0 }))} suggestedId={collection.suggested_task_id} flagged={collection.flagged} />
-            <p className="text-xs text-muted">
-              {collection.suggested_task_id
-                ? "The task that is furthest behind is pre-selected for each episode. You choose from this list only."
-                : "Every task has reached its target. You can keep recording more."}
-            </p>
+            <TaskProgress tasks={cfg.tasks.map((t) => ({ ...t, count: collection.counts[t.id] ?? 0 }))} suggestedId={null} flagged={collection.flagged} />
           </div>
         )}
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Which object next" hint={taskMode === "rotate" ? "One after another: red → green → blue → red …" : "The same object until its target is reached, then the next one"}>
+            <select className={inputClass} value={taskMode} onChange={(e) => setTaskMode(e.target.value as TaskMode)}>
+              <option value="rotate">Rotate through the objects</option>
+              <option value="single">One object until done</option>
+            </select>
+          </Field>
+          <div className="grid content-start gap-2">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Automatic: start and save by themselves
+            </label>
+            {auto ? (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-ink-2">
+                <span>Start after</span>
+                <NumberInput min={1} max={120} step={1} suffix="s" value={autoStart} onChange={setAutoStart} />
+                <span>Save after</span>
+                <NumberInput min={1} max={60} step={1} suffix="s" value={autoSave} onChange={setAutoSave} />
+              </div>
+            ) : (
+              <span className="text-xs text-muted">You press Start and Save for every episode.</span>
+            )}
+            <span className="text-xs text-muted">{auto ? "Discard or re-record any time during the countdown. Episodes flagged as bad are never saved automatically." : ""}</span>
+          </div>
+        </div>
 
         {error && <ErrorBox>{error}</ErrorBox>}
 

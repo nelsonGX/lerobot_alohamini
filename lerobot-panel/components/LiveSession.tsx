@@ -73,11 +73,11 @@ export function LiveSession({
     return () => clearTimeout(t);
   }, [pending]);
 
-  const send = async (action: ControlAction, taskId?: string) => {
+  const send = async (action: ControlAction, taskId?: string, on?: boolean) => {
     setError(null);
-    if (action !== "set_task") setPending(action);
+    if (action !== "set_task" && action !== "set_auto") setPending(action);
     try {
-      await api.control(action, taskId);
+      await api.control(action, taskId, on);
     } catch (e) {
       setPending(null);
       setError(e instanceof Error ? e.message : String(e));
@@ -98,7 +98,8 @@ export function LiveSession({
       const k = e.key.toLowerCase();
       if (k === " " && phase === "ready") sendRef.current("start");
       else if (k === " " && phase === "recording") sendRef.current("done");
-      else if (phase === "review" && k === "s") sendRef.current("save");
+      else if (k === "p" && (phase === "ready" || phase === "review")) sendRef.current("set_auto", undefined, !st?.auto);
+      else if (phase === "review" && (k === "s" || k === " ")) sendRef.current("save");
       else if (phase === "review" && k === "r") sendRef.current("rerecord");
       else if (phase === "review" && k === "d") sendRef.current("discard");
       else return;
@@ -106,7 +107,7 @@ export function LiveSession({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [s.active, phase]);
+  }, [s.active, phase, st?.auto]);
 
   const objects = config?.objects ?? [];
   const slots = config?.slots ?? Object.keys(st?.layout?.names ?? {});
@@ -133,7 +134,7 @@ export function LiveSession({
 
         {s.active && st && (phase === "ready" || phase === "recording" || phase === "review") && (
           <div className="py-6 md:py-8">
-            {phase === "ready" && <Ready st={st} objects={objects} slots={slots} onTask={(id) => send("set_task", id)} onStart={() => send("start")} busy={busy} />}
+            {phase === "ready" && <Ready st={st} objects={objects} slots={slots} onTask={(id) => send("set_task", id)} onStart={() => send("start")} onSend={send} busy={busy} />}
             {phase === "recording" && <Recording st={st} objects={objects} slots={slots} busy={busy} pending={pending} onSend={send} />}
             {phase === "review" && <Review st={st} busy={busy} pending={pending} onSend={send} />}
           </div>
@@ -161,6 +162,7 @@ export function LiveSession({
           <div className="flex flex-wrap items-center gap-3 border-t border-line py-3">
             <SessionChips st={st} />
             <div className="ml-auto flex flex-wrap items-center gap-2">
+              <Toggle size="sm" checked={st.auto} onChange={(on) => send("set_auto", undefined, on)} label="Auto" />
               <Toggle size="sm" checked={voice} onChange={setVoice} label="Voice" />
               <Button size="sm" variant="ghost" disabled={phase !== "ready" || busy} loading={pending === "finish"} onClick={() => send("finish")} title={phase === "ready" ? undefined : "Save or discard the current episode first"}>
                 Finish session
@@ -208,9 +210,9 @@ export function LiveSession({
 }
 
 type Common = { st: EngineState; busy: boolean };
-type Send = (a: ControlAction, taskId?: string) => void;
+type Send = (a: ControlAction, taskId?: string, on?: boolean) => void;
 
-function Ready({ st, objects, slots, onTask, onStart, busy }: Common & { objects: CollectionConfig["objects"]; slots: string[]; onTask: (id: string) => void; onStart: () => void }) {
+function Ready({ st, objects, slots, onTask, onStart, onSend, busy }: Common & { objects: CollectionConfig["objects"]; slots: string[]; onTask: (id: string) => void; onStart: () => void; onSend: Send }) {
   return (
     <div className="grid gap-8 md:grid-cols-[1fr_minmax(0,22rem)]">
       <div>
@@ -224,9 +226,16 @@ function Ready({ st, objects, slots, onTask, onStart, busy }: Common & { objects
           <TaskProgress tasks={st.tasks} suggestedId={st.suggested_task_id} selectedId={st.task_id} onSelect={onTask} />
         </div>
         <Button variant="danger" size="lg" className="h-16 text-lg" disabled={busy || !st.task_id} onClick={onStart}>
-          <span className="size-3 rounded-full bg-white" /> Start recording <Kbd>Space</Kbd>
+          <span className="size-3 rounded-full bg-white" /> {st.auto_in_s != null ? `Starting in ${st.auto_in_s}s — start now` : "Start recording"} <Kbd>Space</Kbd>
         </Button>
-        <p className="text-xs text-muted">Press it once the objects are placed like the picture. The arms follow the leader arms now, but nothing is recorded until you start.</p>
+        {st.auto_in_s != null && (
+          <Button onClick={() => onSend("set_auto", undefined, false)}>
+            Pause automatic mode <Kbd>P</Kbd>
+          </Button>
+        )}
+        <p className="text-xs text-muted">
+          {st.auto ? "Recording starts by itself when the countdown ends: place the objects like the picture." : "Press it once the objects are placed like the picture."} The arms follow the leader arms now, but nothing is recorded until it starts.
+        </p>
       </div>
     </div>
   );
@@ -299,8 +308,8 @@ function Review({ st, busy, pending, onSend }: Common & { pending: ControlAction
       </ul>
       {recommend === "discard" && <p className="text-sm font-medium text-critical-ink">Flagged as probably bad: discarding or re-recording is recommended.</p>}
       <div className="flex flex-wrap items-stretch gap-3">
-        <Button variant={recommend === "save" ? "primary" : "secondary"} size="lg" className="h-16 min-w-52" disabled={busy} loading={pending === "save"} onClick={() => onSend("save")}>
-          Save episode <Kbd>S</Kbd>
+        <Button variant={recommend === "save" ? "primary" : "secondary"} size="lg" className="h-16 min-w-64" disabled={busy} loading={pending === "save"} onClick={() => onSend("save")}>
+          {st.auto_in_s != null ? `Saving in ${st.auto_in_s}s — save now` : "Save episode"} <Kbd>S</Kbd>
         </Button>
         <Button variant={recommend === "discard" ? "primary" : "secondary"} size="lg" className="h-16" disabled={busy} loading={pending === "rerecord"} onClick={() => onSend("rerecord")} title="Throw it away and redo the same task and layout">
           Re-record <Kbd>R</Kbd>
@@ -309,6 +318,8 @@ function Review({ st, busy, pending, onSend }: Common & { pending: ControlAction
           Discard <Kbd>D</Kbd>
         </Button>
       </div>
+      {st.auto_in_s != null && <p className="text-sm text-ink-2">Saved automatically when the countdown ends. Re-record or Discard now to throw it away instead.</p>}
+      {st.auto && recommend === "discard" && <p className="text-xs text-muted">Not saved automatically because it was flagged.</p>}
       <p className="text-xs text-muted">The arms still follow the leader arms, so you can reset the scene while you decide. Nothing is written to the dataset until you press Save.</p>
     </div>
   );

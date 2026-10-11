@@ -1,11 +1,15 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { CameraPreview } from "@/components/CameraPreview";
 import { HealthStrip } from "@/components/HealthStrip";
 import { LayoutDiagram } from "@/components/LayoutDiagram";
 import { PHASE_META } from "@/components/phase";
 import { TaskProgress } from "@/components/TaskProgress";
+import { HistoryCard } from "@/components/HistoryCard";
+import { api, type ProcName, type RobotState } from "@/lib/api";
 import { fmtDuration } from "@/lib/format";
+import { usePoll } from "@/lib/hooks";
 import { useTopic } from "@/lib/live";
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -14,6 +18,9 @@ const pad = (n: number) => String(n).padStart(2, "0");
 export default function WatchPage() {
   const recorder = useTopic("recorder");
   const collection = useTopic("collection").data;
+  const robot = useTopic("robot").data;
+  const host = useTopic("host").data;
+  const history = usePoll(api.history, 10000, [recorder.data?.session?.phase]);
   const session = recorder.data?.session ?? null;
   const st = session?.state ?? null;
   const active = !!session?.active;
@@ -35,6 +42,19 @@ export default function WatchPage() {
             {recorder.error ? <span className="text-critical-ink">{recorder.error}</span> : "Updates live"}
           </span>
         </header>
+
+        <Activity robot={robot} recording={active ? PHASE_META[session!.phase].label : null} operator={session?.operator} />
+
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          <Tile label="Robot host" value={robot ? (robot.jetson.host_listening ? "Running" : "Stopped") : "…"} good={robot?.jetson.host_listening} />
+          <Tile label="Jetson" value={robot ? (robot.jetson.reachable ? robot.jetson.ip : "Unreachable") : "…"} good={robot?.jetson.reachable} />
+          <Tile
+            label="Control link"
+            value={host?.snapshot ? host.snapshot.client.state : "–"}
+            good={host?.snapshot ? host.snapshot.client.state === "live" : undefined}
+          />
+          <Tile label="Host loop" value={host?.snapshot ? `${host.snapshot.loop_hz.toFixed(0)} Hz` : "–"} />
+        </div>
 
         {!recorder.data ? (
           <p className="text-sm text-muted">Loading…</p>
@@ -118,11 +138,89 @@ export default function WatchPage() {
             />
           </section>
         )}
+
+        <HistoryCard history={history.data} />
       </div>
 
       <div className="min-w-0 xl:sticky xl:top-6 xl:self-start">
         <CameraPreview />
       </div>
+      <Clock />
+    </div>
+  );
+}
+
+const PROC_ACTIVITY: Record<Exclude<ProcName, "host">, string> = {
+  teleop: "Teleoperating",
+  restore: "Restoring robot pose",
+  calibrate: "Calibrating",
+};
+
+/** What the robot is doing right now: recording > teleop/calibration/restore > host idle > off. */
+function Activity({ robot, recording, operator }: { robot: RobotState | null; recording: string | null; operator?: string }) {
+  let label = "Connecting…";
+  let detail = "";
+  let color = "var(--muted)";
+  let pulse = false;
+  if (recording) {
+    label = recording === "Recording" ? "Recording" : `Recording session · ${recording}`;
+    detail = operator ? `Operator: ${operator}` : "";
+    color = "var(--critical)";
+    pulse = recording === "Recording";
+  } else if (robot) {
+    const running = (Object.keys(PROC_ACTIVITY) as (keyof typeof PROC_ACTIVITY)[]).find((n) => robot.procs[n]?.state === "running");
+    if (running) {
+      label = PROC_ACTIVITY[running];
+      if (running === "calibrate" && robot.procs.calibrate_target) label = `Calibrating the ${robot.procs.calibrate_target} arms`;
+      color = "var(--info)";
+      pulse = true;
+    } else if (robot.jetson.host_listening) {
+      label = "Idle";
+      detail = "Robot host is on, waiting for someone to start";
+      color = "var(--good)";
+    } else {
+      label = "Robot is off";
+      detail = "The robot host is not running";
+    }
+  }
+  return (
+    <div className="flex items-center gap-4 rounded-lg border border-line bg-surface px-5 py-5">
+      <span className={`size-4 shrink-0 rounded-full ${pulse ? "pulse-dot" : ""}`} style={{ background: color }} aria-hidden />
+      <div className="min-w-0">
+        <div className="eyebrow">Right now</div>
+        <div className="text-2xl font-semibold tracking-tight md:text-3xl">{label}</div>
+        {detail && <div className="mt-0.5 text-sm text-ink-2">{detail}</div>}
+      </div>
+    </div>
+  );
+}
+
+function Tile({ label, value, good }: { label: string; value: string; good?: boolean }) {
+  return (
+    <div className="rounded-lg border border-line px-3 py-2.5">
+      <div className="eyebrow">{label}</div>
+      <div className={`mt-1 flex items-center gap-2 font-mono text-sm ${good === false ? "text-warn-ink" : ""}`}>
+        {good !== undefined && <span className={`size-2 rounded-full ${good ? "bg-good" : "border border-muted"}`} aria-hidden />}
+        {value}
+      </div>
+    </div>
+  );
+}
+
+/** Wall clock pinned to the bottom-left of the screen. */
+function Clock() {
+  const [now, setNow] = useState<Date | null>(null);
+  useEffect(() => {
+    const tick = () => setNow(new Date());
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+  if (!now) return null;
+  return (
+    <div className="pointer-events-none fixed bottom-4 left-4 z-10 rounded-lg border border-line bg-page/90 px-3 py-2 backdrop-blur">
+      <div className="tabular font-mono text-xl font-medium leading-none">{now.toLocaleTimeString([], { hour12: false })}</div>
+      <div className="eyebrow mt-1">{now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}</div>
     </div>
   );
 }

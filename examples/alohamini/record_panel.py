@@ -18,6 +18,10 @@ Commands (one JSON object per line on stdin):
   {"cmd": "done"}                          stop recording and review it (`recording`)
   {"cmd": "save"} | {"cmd": "discard"} | {"cmd": "rerecord"}      decide (`recording` or `review`)
   {"cmd": "finish"}                        end the session (only while `ready`)
+  {"cmd": "set_auto", "on": true|false}    turn the automatic start/save countdowns on or off
+Auto mode (default): `ready` starts by itself after --auto-start-s and a clean `review` is saved after --auto-save-s,
+so a session runs hands-free. During those countdowns the operator can still discard / re-record. An episode that
+is flagged as probably bad is never saved automatically.
 `rerecord` discards and redoes the same task and layout; `discard` discards and moves on to a new layout.
 SIGINT/SIGTERM/SIGHUP or closing stdin end the session gracefully: the episode in progress is discarded.
 
@@ -58,7 +62,7 @@ from collection import (
     now_iso,
     read_records,
     reconcile_records,
-    suggest_task,
+    next_task,
     task_counts,
     validate_dataset,
 )
@@ -102,6 +106,10 @@ class Engine:
         self.fps = args.fps
         self.episode_time_s = args.episode_time_s
         self.rng = random.Random()
+        self.task_mode = args.task_mode
+        self.auto = args.auto_start_s > 0 or args.auto_save_s > 0
+        self.auto_deadline: float | None = None
+        self.last_saved_task: str | None = None
         self.cmds: queue.Queue[dict] = queue.Queue()
         self.shutdown = threading.Event()
         self.shutdown_reason = "finished"
@@ -144,7 +152,10 @@ class Engine:
             "phase": self.phase,
             "message": self.message,
             "tasks": tasks,
-            "suggested_task_id": suggest_task(self.counts, self.cfg),
+            "suggested_task_id": next_task(self.task_mode, self.counts, self.cfg, self.last_saved_task),
+            "task_mode": self.task_mode,
+            "auto": self.auto,
+            "auto_in_s": self.auto_in_s(),
             "task_id": self.task_id,
             "task_text": cur.text if cur else None,
             "layout": describe_layout(self.cfg, self.layout, cur) if cur and self.layout else None,
@@ -165,6 +176,22 @@ class Engine:
         if force or now - self._last_emit >= STATE_EVERY_S:
             self._last_emit = now
             self.emit("state", state=self.state())
+
+    def arm_auto(self, seconds: float) -> None:
+        """(Re)start the countdown for the current phase; a no-op when auto is off."""
+        self.auto_deadline = time.monotonic() + seconds if self.auto and seconds > 0 else None
+
+    def auto_in_s(self) -> int | None:
+        if self.auto_deadline is None or self.phase not in ("ready", "review"):
+            return None
+        return max(0, math.ceil(self.auto_deadline - time.monotonic()))
+
+    def auto_command(self) -> dict | None:
+        if self.auto_deadline is None or time.monotonic() < self.auto_deadline:
+            return None
+        self.auto_deadline = None
+        cmd = {"ready": "start", "review": "save"}.get(self.phase)
+        return {"cmd": cmd} if cmd else None
 
     def set_phase(self, phase: str, message: str = "") -> None:
         self.phase, self.message = phase, message
@@ -326,16 +353,20 @@ class Engine:
             self.layout = new_layout(
                 self.cfg, self.rng, self.layout if self.layout and "slots" in self.layout else None
             )
-            self.task_id = suggest_task(self.counts, self.cfg) or self.task_id or self.cfg.tasks[0].id
+            self.task_id = (
+                next_task(self.task_mode, self.counts, self.cfg, self.last_saved_task) or self.cfg.tasks[0].id
+            )
             self.attempt = 1
         elif same_attempt:
             self.attempt += 1
         self.review = None
         self.remaining_s = None
+        self.arm_auto(self.args.auto_start_s)
         self.set_phase("ready", "Place the objects as shown, then start.")
 
     def record_episode(self) -> None:
         if not self.fresh_observation():
+            self.auto_deadline = None  # don't retry in a loop; the operator decides
             self.set_phase(
                 "ready",
                 "The robot is not sending data - check the Jetson host and the network, then try again.",
@@ -367,6 +398,7 @@ class Engine:
         )
         bad = any(f["severity"] == "bad" for f in flags)
         self.review = {"stats": stats, "flags": flags, "recommend": "discard" if bad else "save"}
+        self.arm_auto(0 if bad else self.args.auto_save_s)  # a probably-bad episode waits for a human decision
         self.set_phase("review", "Recording stopped. Nothing is saved yet.")
 
     def save_episode(self) -> None:
@@ -399,6 +431,7 @@ class Engine:
             },
         )
         self.counts[task.id] = self.counts.get(task.id, 0) + 1
+        self.last_saved_task = task.id
         self.episodes.append({"index": index, "task_id": task.id, "status": "saved",
                               "flags": [f["code"] for f in flags], "duration_s": stats.get("duration_s")})  # fmt: skip
         self.pending_stats = None
@@ -426,7 +459,14 @@ class Engine:
         if name == "set_task" and phase == "ready":
             if cmd.get("task_id") in {t.id for t in self.cfg.tasks}:
                 self.task_id = cmd["task_id"]
+                self.arm_auto(self.args.auto_start_s)
                 self.publish(force=True)
+        elif name == "set_auto":
+            self.auto = bool(cmd.get("on"))
+            self.arm_auto({"ready": self.args.auto_start_s, "review": self.args.auto_save_s}.get(phase, 0))
+            if self.auto and phase == "review" and (self.review or {}).get("recommend") == "discard":
+                self.auto_deadline = None
+            self.publish(force=True)
         elif name == "start" and phase == "ready":
             self.record_episode()
             if self.shutdown.is_set():
@@ -475,12 +515,17 @@ class Engine:
             self.health = HealthMonitor(self.fps, cams, self.cfg.quality)
             self.open_dataset()
             try:
+                self.last_saved_task = (read_records(self.root)[-1:] or [{}])[0].get("task_id")
                 self.start_new_slot(reroll=True)
                 threading.Thread(target=self.read_stdin, daemon=True).start()
                 while not self.shutdown.is_set():
                     try:
                         cmd = self.cmds.get_nowait()
                     except queue.Empty:
+                        if (cmd := self.auto_command()) is not None:
+                            if self.handle(cmd):
+                                break
+                            continue
                         if self.phase in PHASES_WITH_ARMS_LIVE:
                             self.idle_step()
                         else:
@@ -527,6 +572,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--fps", type=int, default=30, help="Only used when the dataset is created")
     p.add_argument("--episode-time-s", type=int, default=60, help="Maximum episode length")
+    p.add_argument("--task-mode", default="rotate", choices=["rotate", "single"], help="Order of the tasks")
+    p.add_argument("--auto-start-s", type=int, default=8, help="Start each episode by itself after this many seconds (0 = manual)")
+    p.add_argument("--auto-save-s", type=int, default=3, help="Save a clean episode by itself after this many seconds (0 = manual)")
     p.add_argument("--remote-ip", default="127.0.0.1")
     p.add_argument("--robot-id", default="my_alohamini")
     p.add_argument(

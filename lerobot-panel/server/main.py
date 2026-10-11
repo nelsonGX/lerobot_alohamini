@@ -107,6 +107,9 @@ def _collection_check() -> dict:
 class StartRequest(BaseModel):
     operator: str = Field(max_length=60)
     episode_time_s: int = Field(ge=3, le=600)
+    task_mode: str = Field(default="rotate", pattern="^(rotate|single)$")
+    auto_start_s: int = Field(default=8, ge=0, le=120)  # 0 = press Start for every episode
+    auto_save_s: int = Field(default=3, ge=0, le=60)  # 0 = press Save for every episode
 
 
 @app.post("/api/recorder/start")
@@ -128,15 +131,19 @@ def start_recording(req: StartRequest) -> dict:
     if users := controls.leader_users():
         raise HTTPException(409, f"{users[0]} is using the leader arms. Stop it on the Robot page first.")
     try:
-        session = recorder.start(settings=load_settings(), operator=operator, episode_time_s=req.episode_time_s)
+        session = recorder.start(
+            settings=load_settings(), operator=operator, episode_time_s=req.episode_time_s,
+            task_mode=req.task_mode, auto_start_s=req.auto_start_s, auto_save_s=req.auto_save_s,
+        )  # fmt: skip
     except RecorderBusy as e:
         raise HTTPException(409, str(e)) from e
     return {"id": session.id}
 
 
 class ControlRequest(BaseModel):
-    action: str = Field(pattern="^(start|done|save|discard|rerecord|finish|set_task|abort)$")
+    action: str = Field(pattern="^(start|done|save|discard|rerecord|finish|set_task|set_auto|abort)$")
     task_id: str | None = Field(default=None, max_length=64)
+    on: bool | None = None
 
 
 @app.post("/api/recorder/control")
@@ -149,6 +156,8 @@ def control(req: ControlRequest) -> dict:
             if req.task_id not in {t.id for t in collection.load_config().tasks}:
                 raise HTTPException(400, "Unknown task")
             recorder.command("set_task", task_id=req.task_id)
+        elif req.action == "set_auto":
+            recorder.command("set_auto", on=bool(req.on))
         else:
             recorder.command(req.action)
     except (RuntimeError, collection.ConfigError) as e:

@@ -30,7 +30,7 @@ KEEP_SESSION_DIRS = 15
 # A graceful stop may have to finish encoding an episode; only a hung engine gets killed.
 KILL_AFTER_S = 120
 
-COMMANDS = {"set_task", "start", "done", "save", "discard", "rerecord", "finish"}
+COMMANDS = {"set_auto", "set_task", "start", "done", "save", "discard", "rerecord", "finish"}
 
 # Known failures -> what the operator should do about them.
 ERROR_HINTS = [
@@ -108,7 +108,10 @@ class Recorder:
 
     # ---------- lifecycle ----------
 
-    def start(self, *, settings: Settings, operator: str, episode_time_s: int) -> Session:
+    def start(
+        self, *, settings: Settings, operator: str, episode_time_s: int, task_mode: str = "rotate",
+        auto_start_s: int = 8, auto_save_s: int = 3,
+    ) -> Session:  # fmt: skip
         with self._lock:
             if self._session and self._session.active:
                 raise RecorderBusy(f"{self._session.operator} is already recording")
@@ -125,6 +128,9 @@ class Recorder:
                 "--events", str(events_path),
                 "--fps", str(settings.default_fps),
                 "--episode-time-s", str(episode_time_s),
+                "--task-mode", task_mode,
+                "--auto-start-s", str(auto_start_s),
+                "--auto-save-s", str(auto_save_s),
                 "--remote-ip", settings.jetson_ip,
                 "--robot-model", settings.robot_model,
                 "--teleop-id", settings.teleop_id,

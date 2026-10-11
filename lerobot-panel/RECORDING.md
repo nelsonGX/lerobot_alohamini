@@ -22,6 +22,14 @@ behind. The arms keep following the leader arms in *Get ready* and *Review*, so 
 
 When you are finished press **Finish session** (only possible between episodes).
 
+## Automatic mode (default)
+
+Choose at session start: **Automatic** (start after N s, save after N s) and **Which object next**:
+*Rotate* (red → green → blue → red …, following the saved episodes) or *One object until done* (e.g. red ×50, then green …).
+In automatic mode *Get ready* ends by itself with a countdown (`P` pauses it, `Space` starts now) and a clean episode is saved when
+the review countdown ends. To throw one away just press **R** (re-record, same layout) or **D** (discard, new layout) before it
+reaches zero. Episodes flagged as probably bad are never saved automatically.
+
 ## Stream health (top of the screen)
 
 Green = fine. If something turns red (▲) during recording, the episode will probably be flagged:
