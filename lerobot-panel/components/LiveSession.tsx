@@ -256,7 +256,7 @@ function Recording({ st, objects, slots, busy, pending, onSend }: Common & { obj
           <div className="h-full transition-[width] duration-500 ease-linear" style={{ width: `${progress * 100}%`, background: "var(--critical)" }} />
         </div>
         <div className="mt-6 flex flex-wrap items-stretch gap-3">
-          <Button variant="primary" size="lg" className="h-16 min-w-72 flex-1 text-lg md:flex-none" disabled={busy} loading={pending === "done"} onClick={() => onSend("done")}>
+          <Button variant="primary" size="lg" className="h-16 w-full flex-1 text-lg sm:min-w-72 md:flex-none" disabled={busy} loading={pending === "done"} onClick={() => onSend("done")}>
             Done — task finished <Kbd>Space</Kbd>
           </Button>
           <Button size="lg" className="h-16" disabled={busy} loading={pending === "rerecord"} onClick={() => onSend("rerecord")} title="Throw this recording away and redo the same task and layout">
@@ -308,7 +308,7 @@ function Review({ st, busy, pending, onSend }: Common & { pending: ControlAction
       </ul>
       {recommend === "discard" && <p className="text-sm font-medium text-critical-ink">Flagged as probably bad: discarding or re-recording is recommended.</p>}
       <div className="flex flex-wrap items-stretch gap-3">
-        <Button variant={recommend === "save" ? "primary" : "secondary"} size="lg" className="h-16 min-w-64" disabled={busy} loading={pending === "save"} onClick={() => onSend("save")}>
+        <Button variant={recommend === "save" ? "primary" : "secondary"} size="lg" className="h-16 w-full sm:w-auto sm:min-w-64" disabled={busy} loading={pending === "save"} onClick={() => onSend("save")}>
           {st.auto_in_s != null ? `Saving in ${st.auto_in_s}s — save now` : "Save episode"} <Kbd>S</Kbd>
         </Button>
         <Button variant={recommend === "discard" ? "primary" : "secondary"} size="lg" className="h-16" disabled={busy} loading={pending === "rerecord"} onClick={() => onSend("rerecord")} title="Throw it away and redo the same task and layout">

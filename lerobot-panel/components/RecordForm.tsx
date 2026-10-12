@@ -133,7 +133,7 @@ export function RecordForm({
         {error && <ErrorBox>{error}</ErrorBox>}
 
         <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-line pt-5">
-          <Button type="submit" variant="danger" size="lg" disabled={!canStart} loading={starting} loadingText="Starting…" className="min-w-52" title={missing ?? undefined}>
+          <Button type="submit" variant="danger" size="lg" disabled={!canStart} loading={starting} loadingText="Starting…" className="w-full sm:w-auto sm:min-w-52" title={missing ?? undefined}>
             <span className="size-3 rounded-full bg-white" />
             Start session
           </Button>

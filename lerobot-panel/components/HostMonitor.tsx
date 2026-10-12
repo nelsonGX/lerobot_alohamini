@@ -134,7 +134,7 @@ function Arm({ arm }: { arm: HostArm }) {
           </span>
         )}
       </div>
-      <div className="grid grid-cols-[10rem_1fr_3.5rem_3.5rem_3rem_6.5rem] items-center gap-x-3 gap-y-1.5 font-mono text-xs">
+      <div className="-mx-1 overflow-x-auto px-1 pb-1"><div className="grid min-w-[34rem] grid-cols-[8rem_1fr_3.5rem_3.5rem_3rem_6.5rem] sm:grid-cols-[10rem_1fr_3.5rem_3.5rem_3rem_6.5rem] items-center gap-x-3 gap-y-1.5 font-mono text-xs">
         <span className="eyebrow">joint</span>
         <span className="eyebrow">● now  ◆ cmd</span>
         <span className="eyebrow text-right">now</span>
@@ -144,7 +144,7 @@ function Arm({ arm }: { arm: HostArm }) {
         {arm.joints.map((j) => (
           <Joint key={j.name} j={j} />
         ))}
-      </div>
+      </div></div>
     </div>
   );
 }

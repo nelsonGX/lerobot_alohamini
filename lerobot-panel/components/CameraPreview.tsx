@@ -11,7 +11,7 @@ export function CameraPreview() {
 
   // On wide screens the column is as tall as the viewport and the tiles share it, so every camera is visible at once.
   return (
-    <section className="flex flex-col rounded-lg border border-line bg-surface xl:h-[calc(100vh-5rem)]">
+    <section className="flex flex-col rounded-lg border border-line bg-surface xl:h-[calc(100dvh-6.25rem)]">
       <header className="flex min-h-10 items-center justify-between gap-3 border-b border-line px-3 py-1.5">
         <h2 className="text-sm font-semibold">Cameras</h2>
         {cams.length > 0 && <span className="eyebrow">{cams.filter((c) => c.live).length} live</span>}

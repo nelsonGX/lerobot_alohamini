@@ -178,7 +178,7 @@ function DatasetView() {
         </Card>
       ) : (
         <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
-          <aside className="flex max-h-[calc(100vh-120px)] flex-col overflow-hidden rounded-lg border border-line bg-surface lg:sticky lg:top-20">
+          <aside className="flex max-h-72 flex-col lg:max-h-[calc(100vh-120px)] overflow-hidden rounded-lg border border-line bg-surface lg:sticky lg:top-20">
             <div className="flex items-center justify-between border-b border-line px-3 py-2 text-xs text-muted">
               <span>{episodes.length} episodes</span>
               {selected.size > 0 ? (

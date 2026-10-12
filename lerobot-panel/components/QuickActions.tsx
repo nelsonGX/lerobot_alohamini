@@ -67,25 +67,25 @@ export function QuickActions() {
   };
 
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="sm:relative">
       <button
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 text-xs font-medium text-ink-2 hover:border-ink-2 hover:text-ink"
+        className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-2 text-xs font-medium sm:py-1 text-ink-2 hover:border-ink-2 hover:text-ink"
       >
         Quick actions
         <svg viewBox="0 0 12 12" className={`size-3 transition ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M2 4.5 6 8.5l4-4" /></svg>
       </button>
       {open && (
-        <div role="menu" className="absolute right-0 top-full z-30 mt-2 w-72 rounded-lg border border-line bg-surface p-1 shadow-lg">
+        <div role="menu" className="fixed inset-x-3 top-[6.5rem] z-30 max-h-[calc(100dvh-8rem)] overflow-y-auto sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-72 rounded-lg border border-line bg-surface p-1 shadow-lg">
           {items.map((item) => (
             <button
               key={item.key}
               role="menuitem"
               disabled={!!item.blocked || busy !== null}
               onClick={() => go(item)}
-              className="flex w-full items-start justify-between gap-2 rounded-md px-3 py-2 text-left text-sm enabled:hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex w-full items-start justify-between gap-2 rounded-md px-3 py-3 text-left text-sm sm:py-2 enabled:hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <span>
                 <span className={`block font-medium ${item.danger ? "text-critical-ink" : ""}`}>{item.label}</span>

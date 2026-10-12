@@ -142,7 +142,7 @@ export default function WatchPage() {
         <HistoryCard history={history.data} />
       </div>
 
-      <div className="min-w-0 xl:sticky xl:top-6 xl:self-start">
+      <div className="min-w-0 xl:sticky xl:top-[4.5rem] xl:self-start">
         <CameraPreview />
       </div>
       <Clock />
@@ -218,7 +218,7 @@ function Clock() {
   }, []);
   if (!now) return null;
   return (
-    <div className="pointer-events-none fixed bottom-4 left-4 z-10 rounded-lg border border-line bg-page/90 px-3 py-2 backdrop-blur">
+    <div className="pointer-events-none fixed bottom-4 left-4 hidden sm:block z-10 rounded-lg border border-line bg-page/90 px-3 py-2 backdrop-blur">
       <div className="tabular font-mono text-xl font-medium leading-none">{now.toLocaleTimeString([], { hour12: false })}</div>
       <div className="eyebrow mt-1">{now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}</div>
     </div>

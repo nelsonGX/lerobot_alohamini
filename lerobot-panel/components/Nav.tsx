@@ -23,7 +23,7 @@ export function Nav() {
     return (
       <Link
         href={href}
-        className={`relative px-3 py-4 text-sm transition ${on ? "text-ink after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-ink" : "text-ink-2 hover:text-ink"}`}
+        className={`relative flex-1 whitespace-nowrap flex items-center justify-center px-3 py-3 text-center text-sm transition sm:h-12 sm:flex-none sm:py-0 ${on ? "text-ink after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-ink" : "text-ink-2 hover:text-ink"}`}
       >
         {label}
       </Link>
@@ -32,11 +32,11 @@ export function Nav() {
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-page/90 backdrop-blur">
-      <div className="flex h-12 items-center gap-2 px-4">
-        <Link href="/" className="mr-3 flex items-center gap-2 font-semibold">
+      <div className="flex flex-wrap items-center gap-x-2 px-3 sm:h-12 sm:flex-nowrap sm:px-4">
+        <Link href="/" className="mr-1 flex h-12 items-center gap-2 font-semibold sm:mr-3">
           <span className="font-mono text-sm font-semibold tracking-tight">alohamini<span className="text-muted">/panel</span></span>
         </Link>
-        <nav className="flex">
+        <nav className="order-last -mx-3 flex w-[calc(100%+1.5rem)] overflow-x-auto border-t border-line sm:order-none sm:mx-0 sm:w-auto sm:border-0">
           {tab("/", "Watch")}
           {tab("/record", "Record")}
           {tab(
@@ -50,7 +50,7 @@ export function Nav() {
           )}
           {tab("/datasets", "Datasets")}
         </nav>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2">
           {error ? (
             <span className="flex items-center gap-1.5 rounded-full border border-critical/40 px-3 py-1 text-xs text-critical-ink">
               Backend offline
@@ -74,7 +74,7 @@ export function Nav() {
           <QuickActions />
           <button
             onClick={() => setSettingsOpen(true)}
-            className="rounded-md p-2 text-ink-2 hover:bg-surface-2 hover:text-ink"
+            className="rounded-md p-2.5 text-ink-2 hover:bg-surface-2 hover:text-ink sm:p-2"
             aria-label="Settings"
             title="Settings"
           >

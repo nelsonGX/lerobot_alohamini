@@ -25,7 +25,7 @@ const variants: Record<Variant, string> = {
   warn: "bg-warn text-black border-transparent hover:brightness-105 active:brightness-95",
   ghost: "bg-transparent text-ink-2 border-transparent hover:bg-surface-2 hover:text-ink active:bg-surface-2",
 };
-const sizes: Record<Size, string> = { sm: "h-8 px-3 text-sm", md: "h-10 px-4 text-sm", lg: "h-14 px-5 text-base" };
+const sizes: Record<Size, string> = { sm: "h-10 px-3 text-sm sm:h-8", md: "h-10 px-4 text-sm", lg: "h-14 px-5 text-base" };
 
 const buttonBase =
   "relative inline-flex select-none items-center justify-center gap-2 whitespace-nowrap rounded-md border font-medium " +
@@ -201,7 +201,7 @@ export function Field({ label, hint, error, optional, children }: {
 }
 
 export const inputClass =
-  "w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink shadow-xs outline-none transition " +
+  "w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-base text-ink shadow-xs outline-none sm:py-2 sm:text-sm transition " +
   "placeholder:text-muted hover:border-ink-2/40 focus:border-accent focus:ring-3 focus:ring-accent/20 " +
   "aria-[invalid=true]:border-critical aria-[invalid=true]:focus:ring-critical/20 " +
   "disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-ink-2 disabled:hover:border-line";
@@ -624,7 +624,7 @@ export function Modal({ open, onClose, title, children }: {
       ref={ref}
       onClose={onClose}
       onClick={(e) => e.target === ref.current && onClose()}
-      className="m-auto w-[min(520px,calc(100vw-32px))] rounded-lg border border-line bg-surface p-0 text-ink shadow-2xl backdrop:bg-black/50"
+      className="m-auto max-h-[calc(100dvh-24px)] w-[min(520px,calc(100vw-24px))] overflow-y-auto rounded-lg border border-line bg-surface p-0 text-ink shadow-2xl backdrop:bg-black/50"
     >
       <div className="flex items-center justify-between gap-3 border-b border-line py-2 pr-2 pl-5">
         <span className="font-semibold">{title}</span>
