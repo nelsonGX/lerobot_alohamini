@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Fine-tune a pretrained VLA on a locally recorded dataset (run on the GPU server; tuned for a 48 GB RTX A6000).
+# Usage: ./train_vla <dataset_name> [smolvla|pi05|pi0] [extra lerobot-train args...]
+#   e.g. ./train_vla alohamini/pick_by_voice smolvla --steps=30000
+set -euo pipefail
+cd "$(dirname "$0")"
+DATASET="${1:?usage: ./train_vla <dataset_name> [smolvla|pi05|pi0] [extra args]}"
+POLICY="${2:-smolvla}"
+shift $(( $# < 2 ? $# : 2 ))
+case "$POLICY" in
+  smolvla) BASE=lerobot/smolvla_base; BATCH=64; STEPS=20000 ;;
+  pi05)    BASE=lerobot/pi05_base;    BATCH=8;  STEPS=30000 ;;
+  pi0)     BASE=lerobot/pi0_base;     BATCH=8;  STEPS=30000 ;;
+  *) echo "unknown VLA '$POLICY' (use smolvla, pi05 or pi0)" >&2; exit 1 ;;
+esac
+# Defaults come first so extra args (e.g. --batch_size=16) override them.
+uv run lerobot-train \
+  --policy.path="$BASE" \
+  --dataset.repo_id="$DATASET" \
+  --batch_size="$BATCH" \
+  --steps="$STEPS" \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --wandb.enable=false \
+  --job_name="$(basename "$DATASET")_$POLICY" \
+  --output_dir="outputs/train/$(basename "$DATASET")_$POLICY" \
+  "$@"

@@ -39,5 +39,5 @@ quality:
   time_limit_margin_s: 0.5
 upload:
   hub_repo_id: ''
-  rsync_dest: ''
+  rsync_dest: 'root@140.136.155.73:/root/.cache/huggingface/lerobot/alohamini/pick_by_voice'
 checkpoint_every: 1
