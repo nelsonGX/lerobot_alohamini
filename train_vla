@@ -7,8 +7,11 @@ cd "$(dirname "$0")"
 DATASET="${1:?usage: ./train_vla <dataset_name> [smolvla|pi05|pi0] [extra args]}"
 POLICY="${2:-smolvla}"
 shift $(( $# < 2 ? $# : 2 ))
+RENAME=""
 case "$POLICY" in
-  smolvla) BASE=lerobot/smolvla_base; BATCH=64; STEPS=20000 ;;
+  # smolvla_base expects camera1..3; AlohaMini records overhead + chest (camera3 is simply unused).
+  smolvla) BASE=lerobot/smolvla_base; BATCH=64; STEPS=20000
+           RENAME='{"observation.images.overhead": "observation.images.camera1", "observation.images.chest": "observation.images.camera2"}' ;;
   pi05)    BASE=lerobot/pi05_base;    BATCH=8;  STEPS=30000 ;;
   pi0)     BASE=lerobot/pi0_base;     BATCH=8;  STEPS=30000 ;;
   *) echo "unknown VLA '$POLICY' (use smolvla, pi05 or pi0)" >&2; exit 1 ;;
@@ -24,4 +27,5 @@ uv run lerobot-train \
   --wandb.enable=false \
   --job_name="$(basename "$DATASET")_$POLICY" \
   --output_dir="outputs/train/$(basename "$DATASET")_$POLICY" \
+  ${RENAME:+--rename_map="$RENAME"} \
   "$@"
