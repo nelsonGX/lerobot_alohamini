@@ -134,6 +134,7 @@ export function LiveSession({
 
         {s.active && st && (phase === "ready" || phase === "recording" || phase === "review") && (
           <div className="py-6 md:py-8">
+            <NowBanner phase={phase} st={st} />
             {phase === "ready" && <Ready st={st} objects={objects} slots={slots} onTask={(id) => send("set_task", id)} onStart={() => send("start")} onSend={send} busy={busy} />}
             {phase === "recording" && <Recording st={st} objects={objects} slots={slots} busy={busy} pending={pending} onSend={send} />}
             {phase === "review" && <Review st={st} busy={busy} pending={pending} onSend={send} />}
@@ -209,6 +210,32 @@ export function LiveSession({
   );
 }
 
+/** One line that says what the operator should be doing right now, with the auto-countdown big enough to read from across the table. */
+function NowBanner({ phase, st }: { phase: "ready" | "recording" | "review"; st: EngineState }) {
+  const flagged = st.review?.recommend === "discard";
+  const cfg = {
+    ready: { color: "var(--info)", step: "NOW", text: "Place the objects like the picture", sub: st.auto ? "Recording starts by itself when the timer ends" : "Then press Start" },
+    recording: { color: "var(--critical)", step: "NOW", text: "Perform the task", sub: "Press Done as soon as it is finished" },
+    review: { color: "var(--warn)", step: "NOW", text: flagged ? "Check this episode — it may be bad" : "Keep this episode?", sub: st.auto && !flagged ? "It is saved by itself when the timer ends" : "Save, re-record or discard" },
+  }[phase];
+  const count = phase === "recording" ? null : st.auto_in_s;
+  return (
+    <div className="mb-6 flex items-center gap-4 border-l-4 py-1 pl-4 md:gap-6" style={{ borderColor: cfg.color }} role="status" aria-live="polite">
+      <div className="min-w-0 flex-1">
+        <div className="font-mono text-xs font-semibold tracking-widest" style={{ color: cfg.color }}>{cfg.step}</div>
+        <div className="text-xl font-semibold leading-tight md:text-3xl">{cfg.text}</div>
+        <div className="mt-0.5 text-sm text-ink-2">{cfg.sub}</div>
+      </div>
+      {count != null && (
+        <div className="shrink-0 text-right">
+          <div key={count} className="tabular pop-in font-mono text-5xl font-medium leading-none md:text-7xl" style={{ color: cfg.color }}>{count}</div>
+          <div className="eyebrow mt-1">{phase === "ready" ? "sec to start" : "sec to save"}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type Common = { st: EngineState; busy: boolean };
 type Send = (a: ControlAction, taskId?: string, on?: boolean) => void;
 
@@ -244,15 +271,21 @@ function Ready({ st, objects, slots, onTask, onStart, onSend, busy }: Common & {
 function Recording({ st, objects, slots, busy, pending, onSend }: Common & { objects: CollectionConfig["objects"]; slots: string[]; pending: ControlAction | null; onSend: Send }) {
   const remaining = st.remaining_s ?? st.episode_time_s;
   const progress = 1 - remaining / Math.max(st.episode_time_s, 1);
+  const ending = remaining <= 5;
+  const low = remaining <= 10;
+  const color = low ? "var(--critical)" : "var(--ink)";
   return (
     <div className="grid gap-8 md:grid-cols-[1fr_20rem] md:gap-12">
       <div className="min-w-0">
-        <div className="tabular font-mono text-[clamp(5rem,16vw,11rem)] font-medium leading-[0.85] tracking-tighter">
+        <div className={`tabular font-mono text-[clamp(6rem,22vw,15rem)] font-semibold leading-[0.85] tracking-tighter ${ending ? "pulse-dot" : ""}`} style={{ color }}>
           {pad(remaining)}
-          <span className="ml-2 text-[0.22em] tracking-normal text-muted">sec</span>
+          <span className="ml-2 text-[0.2em] tracking-normal text-muted">sec left</span>
         </div>
-        <div className="eyebrow mt-4">until the episode ends by itself</div>
-        <div className="mt-4 h-2 overflow-hidden rounded-[2px] bg-surface-2">
+        <div className="mt-4 flex items-baseline justify-between font-mono text-xs text-muted">
+          <span className="eyebrow">{ending ? "Ending — wrap up now" : "until the episode ends by itself"}</span>
+          <span className="tabular">{st.episode_time_s - remaining}s / {st.episode_time_s}s</span>
+        </div>
+        <div className="mt-2 h-4 overflow-hidden rounded-[2px] bg-surface-2">
           <div className="h-full transition-[width] duration-500 ease-linear" style={{ width: `${progress * 100}%`, background: "var(--critical)" }} />
         </div>
         <div className="mt-6 flex flex-wrap items-stretch gap-3">
