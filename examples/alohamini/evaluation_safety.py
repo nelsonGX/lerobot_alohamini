@@ -72,3 +72,41 @@ class EvaluationSafetyGuard:
         ):
             raise RuntimeError(f"{reason}；评估停止。")
         return observation, reason
+
+
+class EngageRamp:
+    """Ramp arm targets from the follower's current pose to the policy's, so the Host engage gate opens.
+
+    The Host keeps an arm limp until a command lands within its engage tolerance of the follower pose.
+    A policy's first targets are usually further away than that, so after every (re)start this slews
+    each ``.pos`` target at most ``max_step`` per tick, starting from the observed pose, and passes
+    actions through untouched once every joint has caught up with the policy.
+    """
+
+    def __init__(self, max_step: float):
+        self.max_step = max_step
+        self._last = None
+
+    def reset(self):
+        self._last = None
+
+    def apply(self, action, observation):
+        if self.max_step <= 0:
+            return action
+        keys = [k for k in action if k.endswith(".pos") and k in observation]
+        if self._last is None:
+            self._last = {k: float(observation[k]) for k in keys}
+        if not self._last:
+            return action
+        ramped = dict(action)
+        caught_up = True
+        for key in keys:
+            delta = float(action[key]) - self._last[key]
+            if abs(delta) > self.max_step:
+                caught_up = False
+                delta = self.max_step if delta > 0 else -self.max_step
+            ramped[key] = self._last[key] + delta
+            self._last[key] = ramped[key]
+        if caught_up:
+            self._last = {}
+        return ramped

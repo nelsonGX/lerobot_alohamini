@@ -28,9 +28,9 @@ from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
 try:
-    from .evaluation_safety import EvaluationSafetyGuard, hold_action, stop_inference
+    from .evaluation_safety import EngageRamp, EvaluationSafetyGuard, hold_action, stop_inference
 except ImportError:
-    from evaluation_safety import EvaluationSafetyGuard, hold_action, stop_inference
+    from evaluation_safety import EngageRamp, EvaluationSafetyGuard, hold_action, stop_inference
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -120,6 +120,15 @@ def main():
         type=int,
         default=30,
         help="RTC only: trigger a new inference call once the action queue drops to this size.",
+    )
+    parser.add_argument(
+        "--engage_ramp_speed",
+        dest="engage_ramp_speed",
+        type=float,
+        default=30.0,
+        help="At episode start and after a safety restart, move the arms from their current pose to the "
+        "policy's targets at most this fast (joint units per second) so the Host engage gate opens "
+        "instead of leaving the arms limp. 0 disables the ramp.",
     )
     parser.add_argument(
         "--interpolation_multiplier",
@@ -239,6 +248,7 @@ def main():
     control_interval = interpolator.get_control_interval(args.fps)
     recorded = 0
     safety_guard = EvaluationSafetyGuard()
+    engage_ramp = EngageRamp(max_step=args.engage_ramp_speed / (args.fps * args.interpolation_multiplier))
 
     def reset_environment(next_episode: int) -> None:
         """Wait for manual scene reset while draining remote observations."""
@@ -275,6 +285,7 @@ def main():
             engine.reset()
             engine.start()
             interpolator.reset()
+            engage_ramp.reset()
             engine.resume()
             start = time.perf_counter()
             restart_pending = False
@@ -291,6 +302,7 @@ def main():
                         logging.warning("%s；等待新反馈，暂不发送动作。", reason)
                         engine.pause()
                         interpolator.reset()
+                        engage_ramp.reset()
                         restart_pending = True
                     precise_sleep(control_interval)
                     continue
@@ -300,6 +312,7 @@ def main():
                     stop_inference(engine)
                     engine.reset()
                     interpolator.reset()
+                    engage_ramp.reset()
                     engine.start()
                     engine.resume()
                     restart_pending = False
@@ -325,6 +338,7 @@ def main():
                     # Discard predictions across joint protection or prolonged feedback loss.
                     engine.pause()
                     interpolator.reset()
+                    engage_ramp.reset()
                     restart_pending = True
                     precise_sleep(control_interval)
                     continue
@@ -333,6 +347,7 @@ def main():
                 interp_action = interpolator.get()
                 if interp_action is not None:
                     action_dict = {k: interp_action[i].item() for i, k in enumerate(ordered_action_keys)}
+                    action_dict = engage_ramp.apply(action_dict, obs_raw)
                     sent = robot.send_action(robot_action_processor((action_dict, obs_raw)))
                     if sent and robot.observation_updated:
                         action_frame = build_dataset_frame(dataset_features, action_dict, prefix=ACTION)
