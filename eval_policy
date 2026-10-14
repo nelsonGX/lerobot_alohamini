@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Run a trained policy on the real arms. The policy runs on THIS machine; by default that is the Jetson itself,
+# talking to ./host on 127.0.0.1 (start ./host in another terminal first).
+# Usage: ./eval_policy <checkpoint_dir> "<task>" [extra evaluate_bi.py args...]
+#   e.g. ./eval_policy models/pick_by_voice_smolvla "pick up the cup" --eval.n_episodes=5
+#   JETSON_IP=10.95.27.249 ./eval_policy ...   (run from another machine instead of on the Jetson)
+# Starts with ONE 30 s episode for a first, supervised motion; raise it with extra args.
+set -euo pipefail
+cd "$(dirname "$0")"
+CKPT="${1:?usage: ./eval_policy <checkpoint_dir> \"<task>\" [extra args]}"
+TASK="${2:?give the task string exactly as recorded}"
+shift 2
+[ -f "$CKPT/config.json" ] || { echo "no config.json in '$CKPT' (use the .../checkpoints/last/pretrained_model folder)" >&2; exit 1; }
+cat <<MSG
+About to move the REAL arms with $CKPT
+  task:  $TASK
+  robot: ${JETSON_IP:-127.0.0.1}  (./host must be running, panel recording/teleop sessions stopped)
+Keep a hand on the power switch and the workspace clear. Ctrl+C stops the run.
+MSG
+read -r -p "Press ENTER to start (Ctrl+C to cancel) " _
+# Defaults come first so extra args override them. A fresh eval dataset name each run.
+uv run python examples/alohamini/evaluate_bi.py \
+  --policy.path="$CKPT" \
+  --dataset.repo_id="alohamini/eval_$(basename "$CKPT")_$(date +%Y%m%d_%H%M%S)" \
+  --dataset.push_to_hub=false \
+  --dataset.single_task="$TASK" \
+  --robot.remote_ip="${JETSON_IP:-127.0.0.1}" \
+  --robot.robot_model=alohamini1 \
+  --inference.type=rtc \
+  --eval.n_episodes=1 --eval.episode_time_s=30 --eval.reset_time_s=15 \
+  "$@"
