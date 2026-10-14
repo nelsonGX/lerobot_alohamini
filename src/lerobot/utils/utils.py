@@ -143,7 +143,11 @@ def log_say(text: str, play_sounds: bool = True, blocking: bool = False):
     logging.info(text)
 
     if play_sounds:
-        say(text, blocking)
+        try:
+            say(text, blocking)
+        except (OSError, subprocess.CalledProcessError) as e:
+            # Speech is a convenience; a missing TTS binary (e.g. spd-say on a headless box) must not abort a run.
+            logging.debug("Text-to-speech unavailable: %s", e)
 
 
 def get_channel_first_image_shape(image_shape: tuple) -> tuple:
