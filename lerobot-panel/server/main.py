@@ -31,6 +31,8 @@ from preflight import run_checks  # noqa: E402
 from procs import AgentError, Controls, ProcBusy, agent_call, read_token, save_token  # noqa: E402
 from recorder import Recorder, RecorderBusy, load_history  # noqa: E402
 from upload import UploadJob  # noqa: E402
+import gpu_remote  # noqa: E402
+from gpu_jobs import JobRequest  # noqa: E402
 
 recorder = Recorder()
 uploader = UploadJob()
@@ -48,6 +50,25 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="LeRobot Panel", lifespan=lifespan)
+app.include_router(gpu_remote.router)
+
+
+@app.post("/api/gpu/jobs")
+def gpu_start(req: JobRequest) -> dict:
+    with gpu_remote.robot_lock:
+        if req.kind == "robot_eval":
+            if recorder.recording_dataset() or controls.leader_users():
+                raise HTTPException(409, "Stop recording, teleoperation and calibration before live evaluation.")
+            settings = load_settings()
+            robot = controls.jetson_status(settings)
+            if not robot["host_listening"]:
+                raise HTTPException(409, "Start the robot host on the Robot page before live evaluation.")
+            calibration = controls.get("calibrate")
+            if calibration and calibration.running:
+                raise HTTPException(409, "Stop calibration before live evaluation.")
+            req = req.model_copy(update={"robot_ip": settings.jetson_ip, "robot_model": settings.robot_model})
+            gpu_remote.mark_live()
+        return gpu_remote.call("POST", "/jobs", req.model_dump())
 
 
 # ---------- settings & checks ----------
@@ -59,6 +80,7 @@ def get_settings() -> Settings:
 
 
 @app.put("/api/settings")
+@gpu_remote.exclusive_robot
 def put_settings(settings: Settings) -> Settings:
     save_settings(settings)
     return settings
@@ -113,6 +135,7 @@ class StartRequest(BaseModel):
 
 
 @app.post("/api/recorder/start")
+@gpu_remote.exclusive_robot
 def start_recording(req: StartRequest) -> dict:
     operator = " ".join(req.operator.split())
     if not operator:
@@ -315,6 +338,7 @@ class HostStartRequest(BaseModel):
 
 
 @app.post("/api/host/start")
+@gpu_remote.exclusive_robot
 def host_start(req: HostStartRequest) -> dict:
     settings = load_settings()
     if settings.host_cameras != req.cameras:
@@ -327,6 +351,7 @@ def host_start(req: HostStartRequest) -> dict:
 
 
 @app.post("/api/host/stop")
+@gpu_remote.exclusive_robot
 def host_stop() -> dict:
     if recorder.recording_dataset():
         raise HTTPException(409, "A recording is running. Stop it before stopping the robot host.")
@@ -337,6 +362,7 @@ def host_stop() -> dict:
 
 
 @app.post("/api/teleop/start")
+@gpu_remote.exclusive_robot
 def teleop_start() -> dict:
     try:
         controls.start_teleop(load_settings(), recorder_active=recorder.recording_dataset() is not None)
@@ -346,6 +372,7 @@ def teleop_start() -> dict:
 
 
 @app.post("/api/restore/start")
+@gpu_remote.exclusive_robot
 def restore_start() -> dict:
     try:
         controls.start_restore(load_settings(), recorder_active=recorder.recording_dataset() is not None)
@@ -359,6 +386,7 @@ class CalibrateRequest(BaseModel):
 
 
 @app.post("/api/calibrate/start")
+@gpu_remote.exclusive_robot
 def calibrate_start(req: CalibrateRequest) -> dict:
     try:
         controls.start_calibration(load_settings(), req.target, recorder_active=recorder.recording_dataset() is not None)

@@ -45,6 +45,8 @@ develop-eggs/
 *.egg
 MANIFEST
 lib/
+!lerobot-panel/lib/
+!lerobot-panel/lib/**
 lib64/
 
 # PyInstaller
