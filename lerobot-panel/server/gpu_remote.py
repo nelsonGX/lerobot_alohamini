@@ -133,6 +133,11 @@ def detail(job_id: str) -> dict:
     return call("GET", f"/jobs/{_job_id(job_id)}")
 
 
+@router.get("/checkpoints")
+def checkpoints() -> dict:
+    return call("GET", "/checkpoints")
+
+
 @router.post("/jobs/{job_id}/stop")
 def stop(job_id: str) -> dict:
     return call("POST", f"/jobs/{_job_id(job_id)}/stop")

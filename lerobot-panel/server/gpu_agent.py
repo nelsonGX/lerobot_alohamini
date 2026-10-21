@@ -17,11 +17,13 @@ from pathlib import Path
 
 from config import DATA_DIR, REPO_ROOT, lerobot_home
 from fastapi import Depends, FastAPI, Header, HTTPException
+from gpu_checkpoints import scan_checkpoints
 from gpu_jobs import JobRequest, command
 from procs import ConsoleProcess
 
 STATE_DIR = DATA_DIR / "gpu_jobs"
 OUTPUT_DIR = REPO_ROOT / "outputs" / "panel"
+CHECKPOINT_ROOT = REPO_ROOT / "outputs"
 TOKEN_FILE = DATA_DIR / "gpu_agent_token"
 
 
@@ -224,6 +226,11 @@ def status() -> dict:
 @app.post("/jobs")
 def start(req: JobRequest) -> dict:
     return manager().start(req)
+
+
+@app.get("/checkpoints")
+def checkpoints() -> dict:
+    return scan_checkpoints(CHECKPOINT_ROOT)
 
 
 @app.get("/jobs/{job_id}")

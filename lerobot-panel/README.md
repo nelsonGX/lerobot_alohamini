@@ -89,11 +89,18 @@ as with the Jetson agent; the panel/agent connection uses HTTP.
    Supplying a pretrained model uses that model's policy type and starts a new
    fine-tuning run. VLA policies need the appropriate pretrained weights. Checkpoints
    stay local; training does not publish models to the Hub.
-2. **Simulation**: select a job's checkpoint or enter a model ID, then choose the
+2. **Simulation**: select a saved model from **Models in GPU outputs** or enter a model ID, then choose the
    environment, task and episode count. The policy must match the environment's
    observation/action shapes. A policy trained on real Aloha Mini data does not
    automatically work in the Aloha benchmark. Aggregate evaluation results appear
    under the job's logs; videos and other artifacts remain in its output directory.
+   The model picker automatically scans the GPU server's entire `outputs/` directory,
+   including runs launched outside the panel. Choose **Last checkpoint per run** or
+   **All checkpoints**. Last follows a valid `checkpoints/last` link, falling back to
+   the highest numbered checkpoint. The picker lists each physical checkpoint once,
+   and requires a readable config and nonempty model weights. It refreshes every
+   10 seconds or when you press **Refresh**. Selection fills the concrete checkpoint
+   path for fine-tuning, simulation, or live evaluation; it does not start jobs automatically.
 3. **Live robot**: start the Jetson host with cameras on the **Robot** page. The GPU
    server must reach the Jetson's command/observation ports (5555/5556 by default).
    Enter the task, a new `namespace/eval_run` dataset name, episode duration and reset

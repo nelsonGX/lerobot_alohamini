@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Card, ErrorBox, Field, inputClass, Select } from "@/components/ui";
 import { CameraPreview } from "@/components/CameraPreview";
+import { CheckpointPicker } from "@/components/CheckpointPicker";
 import { HostMonitor } from "@/components/HostMonitor";
 import { api, request } from "@/lib/api";
 import { usePoll } from "@/lib/hooks";
@@ -116,7 +117,7 @@ export default function TrainPage() {
             <Field label="Policy"><Select value={policy} onChange={e => setPolicy(e.target.value)}>{["act", "diffusion", "smolvla", "pi0", "pi05"].map(p => <option key={p}>{p}</option>)}</Select></Field>
             <div className="grid grid-cols-2 gap-3">{numeric("Training steps", steps, setSteps)}{numeric("Batch size", batch, setBatch, 1, 4096)}</div>
           </>}
-          <Field label={kind === "train" ? "Pretrained model (optional)" : "Checkpoint or model ID"}><input required={kind !== "train"} className={inputClass} value={checkpoint} onChange={e => setCheckpoint(e.target.value)} placeholder="GPU checkpoint path or namespace/model" /></Field>
+          <CheckpointPicker key={`${connection.data?.host}:${connection.data?.port}`} value={checkpoint} onChange={value => { setCheckpoint(value); setReady(false); }} connected={!!connection.data?.configured} required={kind !== "train"} />
           {kind === "train" && <p className="text-xs text-muted">A pretrained model supplies its own policy type and starts a new fine-tuning run. VLA policies need their pretrained weights.</p>}
           {kind === "sim_eval" && <>
             <Field label="Simulation environment"><Select value={env} onChange={e => { const v = e.target.value as keyof typeof defaults; setEnv(v); setSimTask(defaults[v]); }}>{Object.keys(defaults).map(v => <option key={v}>{v}</option>)}</Select></Field>

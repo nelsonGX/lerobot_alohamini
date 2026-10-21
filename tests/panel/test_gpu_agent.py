@@ -47,6 +47,26 @@ def test_auth_and_private_token(client, tmp_path):
     assert (tmp_path / "token").stat().st_mode & 0o777 == 0o600
 
 
+def test_checkpoint_catalog_route_and_panel_proxy(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(gpu_agent, "CHECKPOINT_ROOT", tmp_path / "outputs")
+    model = tmp_path / "outputs/train/from-terminal/checkpoints/001000/pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text('{"type": "act"}')
+    (model / "model.safetensors").write_bytes(b"weights")
+    assert client.get("/checkpoints", headers={"X-Panel-Token": "wrong"}).status_code == 401
+    result = client.get("/checkpoints").json()
+    assert result["runs"][0]["checkpoints"][0]["path"] == str(model)
+
+    def forward(method, path):
+        assert (method, path) == ("GET", "/checkpoints")
+        return result
+
+    monkeypatch.setattr(gpu_remote, "call", forward)
+    main = importlib.import_module("main")
+    with TestClient(main.app) as panel:
+        assert panel.get("/api/gpu/checkpoints").json() == result
+
+
 def test_commands_are_literal_argv_and_match_modes(tmp_path):
     req = gpu_jobs.JobRequest(
         kind="train", dataset="team/data", dataset_root="/data with spaces/$(touch nope)"
