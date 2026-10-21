@@ -47,6 +47,21 @@ The agent runs the robot host, so the host keeps running if the panel restarts; 
   - Start/stop the robot host on the Jetson through the agent (what `./host` does), with or without cameras.
     A host started from a terminal is detected and can be stopped too.
   - Teleoperate without recording (`./client`).
+  - **Wheels & lift**: connect the separate base USB controller, then hold a direction
+    button (mouse, touch, or focus a button and hold Space/Enter). Release to stop.
+    Use **Stop & disconnect** to revoke control and allow another browser to connect.
+    Keep the arm host's `--no_base` setting. The base controller is identified by
+    `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79018624-if00`, avoiding changing ACM indices.
+    Leave the height blank for wheels only; to enable the lift, enter its measured
+    height in mm above the lowest position (5–600 mm). No automatic homing occurs.
+    Movement uses 3 cm/s translation, 10°/s rotation and 1 cm/s lift speed. The lift
+    is bounded to 5–595 mm from the supplied reference; current/temperature faults,
+    a 0.5-second command timeout, or a 3-second continuous hold stop motion and require
+    reconnecting. Stop keeps lift holding torque enabled. Serial loss can prevent
+    delivery of a stop command; the UI reports that failure. Manual base movements
+    are disabled during recording/live evaluation and are not included in datasets.
+    After updating, restart `./agent` on the Jetson and run `./panel --rebuild` on
+    the panel machine (Node.js 20.9+ and npm required to build).
   - Calibrate the leader arms (`./lcalibrate`) or the follower arms on the Jetson (`./fcalibrate`). Prompts
     such as "press ENTER" become buttons.
   - Pre-flight problems on the Record page have fix buttons, e.g. **Start robot host**.

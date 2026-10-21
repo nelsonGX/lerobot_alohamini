@@ -42,7 +42,12 @@ export type EditJob = { running: boolean; repo_id: string | null; description: s
 const query = (p: Record<string, string | number>) => new URLSearchParams(Object.entries(p).map(([k, v]) => [k, String(v)])).toString();
 export const videoUrl = (repo: string, camera: string, chunk: number, file: number) => `/api/video?${query({ repo, camera, chunk, file })}`;
 export const cameraStreamUrl = (name: string) => `/api/camera/${encodeURIComponent(name)}`;
+export type BaseStatus = { connected: boolean; direction: string; lift_height_mm: number | null; error: string | null; port: string; motors: Record<string, { voltage: number; temperature: number; current_ma: number }> };
 export const api = {
+  baseStatus: () => request<BaseStatus>("/api/base/status"),
+  baseConnect: (lift_height_mm: number | null) => request<BaseStatus & { session: string }>("/api/base/connect", "POST", { lift_height_mm }),
+  baseCommand: (session: string, seq: number, direction: string) => request<BaseStatus>("/api/base/command", "POST", { session, seq, direction }),
+  baseStop: () => request<BaseStatus>("/api/base/stop", "POST"),
   settings: () => request<Settings>("/api/settings"),
   saveSettings: (s: Settings) => request<Settings>("/api/settings", "PUT", s),
   savePlan: (items: PlanItem[]) => request("/api/collection/plan", "PUT", items),

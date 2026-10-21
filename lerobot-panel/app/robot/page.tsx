@@ -2,6 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { HostMonitor } from "@/components/HostMonitor";
+import { BaseControls } from "@/components/BaseControls";
 import { ProcConsole, ProcStatus, useProc } from "@/components/Console";
 import { Button, Card, ErrorBox, Field, inputClass, LinkButton, Spinner, StatusIcon, Toggle, type Status } from "@/components/ui";
 import { api, type JetsonStatus } from "@/lib/api";
@@ -77,6 +78,7 @@ export default function RobotPage() {
       {robot.error && <ErrorBox>Cannot reach the panel backend: {robot.error}</ErrorBox>}
 
       {(j?.host_listening || hostRunning) && <HostMonitor />}
+      <BaseControls available={!!j?.agent_ok && !recording} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Jetson + host */}

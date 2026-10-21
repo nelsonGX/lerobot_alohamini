@@ -25,6 +25,9 @@ from pydantic import BaseModel, Field
 
 from config import DATA_DIR, REPO_ROOT
 from procs import HOST_MODULE, ConsoleProcess
+from base_control import BaseCommand, BaseConnect, BaseController
+
+base = BaseController()
 
 TOKEN_FILE = DATA_DIR / "agent_token"
 CALIBRATE_MODULE = "lerobot.robots.alohamini.alohamini_calibrate"
@@ -49,6 +52,7 @@ TITLES = {"host": "Robot host", "calibrate": "Follower arm calibration"}
 async def lifespan(_app: FastAPI):
     print(f"\nPanel agent ready. Paste this token into the panel (Robot -> Jetson):\n\n    {TOKEN}\n", flush=True)
     yield
+    base.stop()
     for p in procs.values():
         if p and p.running:
             p.stop()
@@ -174,6 +178,34 @@ def host_status() -> dict:
 # ---------- programs ----------
 
 
+@app.get("/base/status", dependencies=[Depends(auth)])
+def base_status() -> dict:
+    return base.snapshot()
+
+
+@app.post("/base/connect", dependencies=[Depends(auth)])
+def base_connect(req: BaseConnect) -> dict:
+    if _running("calibrate"):
+        raise HTTPException(409, "Stop calibration first.")
+    try:
+        return base.connect(req)
+    except Exception as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/base/command", dependencies=[Depends(auth)])
+def base_command(req: BaseCommand) -> dict:
+    try:
+        return base.command(req)
+    except Exception as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/base/stop", dependencies=[Depends(auth)])
+def base_stop() -> dict:
+    return base.stop()
+
+
 class StartRequest(BaseModel):
     name: str = Field(pattern="^(host|calibrate)$")
     robot_model: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
@@ -183,6 +215,8 @@ class StartRequest(BaseModel):
 
 @app.post("/start", dependencies=[Depends(auth)])
 def start(req: StartRequest) -> dict:
+    if base.snapshot()["connected"] and "--no_base" not in shlex.split(req.host_args):
+        raise HTTPException(409, "Disconnect panel wheels and lift before starting a host/calibration that uses the base.")
     if _running("host") or _running("calibrate") or _host_pids():
         raise HTTPException(409, "The robot host or a calibration is already running on the Jetson.")
     model = shlex.quote(req.robot_model)

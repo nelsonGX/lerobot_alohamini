@@ -33,6 +33,7 @@ from recorder import Recorder, RecorderBusy, load_history  # noqa: E402
 from upload import UploadJob  # noqa: E402
 import gpu_remote  # noqa: E402
 from gpu_jobs import JobRequest  # noqa: E402
+from base_control import BaseCommand, BaseConnect  # noqa: E402
 
 recorder = Recorder()
 uploader = UploadJob()
@@ -377,6 +378,45 @@ def jetson_setup(req: JetsonSetupRequest) -> dict:
 
 class HostStartRequest(BaseModel):
     cameras: bool = False
+
+
+def _base_call(method: str, path: str, body: dict | None = None) -> dict:
+    settings = load_settings()
+    try:
+        return agent_call(settings.jetson_ip, settings.agent_port, method, path, body=body)
+    except (RuntimeError, OSError) as exc:
+        raise _proc_error(exc) from exc
+
+
+@app.get("/api/base/status")
+def base_status() -> dict:
+    return _base_call("GET", "/base/status")
+
+
+@app.post("/api/base/connect")
+@gpu_remote.exclusive_robot
+def base_connect(req: BaseConnect) -> dict:
+    if recorder.recording_dataset():
+        raise HTTPException(409, "Stop recording before enabling manual base controls.")
+    req = req.model_copy(update={"robot_model": load_settings().robot_model})
+    # Validate the persisted model before forwarding it to the hardware agent.
+    req = BaseConnect.model_validate(req.model_dump())
+    return _base_call("POST", "/base/connect", req.model_dump())
+
+
+@app.post("/api/base/command")
+@gpu_remote.exclusive_robot
+def base_command(req: BaseCommand) -> dict:
+    if recorder.recording_dataset():
+        _base_call("POST", "/base/stop")
+        raise HTTPException(409, "Manual base controls are disabled while recording.")
+    return _base_call("POST", "/base/command", req.model_dump())
+
+
+@app.post("/api/base/stop")
+def base_stop() -> dict:
+    # Stopping must remain available during recording and live evaluation.
+    return _base_call("POST", "/base/stop")
 
 
 @app.post("/api/host/start")
