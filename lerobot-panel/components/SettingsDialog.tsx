@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type PlanItem, type Settings } from "@/lib/api";
+import { api, type NewDatasetItem, type PlanItem, type Settings } from "@/lib/api";
 import { useTopic } from "@/lib/live";
 import { Button, ErrorBox, Field, inputClass, Modal, NumberInput, Select, Spinner } from "./ui";
 
@@ -43,6 +43,37 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
       setPlanError(e instanceof Error ? e.message : String(e));
     } finally {
       setPlanSaving(false);
+    }
+  };
+  const [newOpen, setNewOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newItems, setNewItems] = useState<NewDatasetItem[]>([]);
+  const [newError, setNewError] = useState<string | null>(null);
+  const [newSaving, setNewSaving] = useState(false);
+  const startNew = () => {
+    setNewName(`${s?.default_namespace || "alohamini"}/`);
+    setNewItems(
+      [0, 1].map((i) => ({ name: "", color: ["#e53935", "#1e88e5"][i], task_text: "", target: 50 })),
+    );
+    setNewError(null);
+    setNewOpen(true);
+  };
+  const setNew = (i: number, patch: Partial<NewDatasetItem>) => setNewItems((p) => p.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  const newValid =
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(newName) &&
+    newItems.length >= 2 &&
+    newItems.every((it) => it.name.trim() && it.task_text.trim().length >= 3 && it.target >= 1);
+  const createNew = async () => {
+    setNewSaving(true);
+    setNewError(null);
+    try {
+      await api.newDataset(newName, newItems);
+      setNewOpen(false);
+      setPlanFor(false); // reload the objects and tasks editor from the new plan
+    } catch (e) {
+      setNewError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewSaving(false);
     }
   };
   const hasData = (collection?.total_episodes ?? 0) > 0;
@@ -155,6 +186,57 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               </div>
             </div>
           )}
+          <div className="border-t border-line pt-4">
+            <div className="mb-1 text-sm font-semibold">New dataset</div>
+            <p className="mb-3 text-xs text-muted">
+              Currently recording into <span className="font-mono">{collection?.config.dataset}</span>. Start a new dataset with its own objects and
+              sentences; the old one stays untouched and its plan is kept as a copy.
+            </p>
+            {!newOpen ? (
+              <Button disabled={recording} onClick={startNew}>
+                New dataset…
+              </Button>
+            ) : (
+              <div className="grid gap-3">
+                <Field label="Dataset name" hint="namespace/name, e.g. alohamini/pick_fruit">
+                  <input className={`${inputClass} font-mono`} spellCheck={false} value={newName} onChange={(e) => setNewName(e.target.value.trim())} />
+                </Field>
+                {newItems.map((it, i) => (
+                  <div key={i} className="grid grid-cols-[auto_1fr_5rem] items-end gap-2">
+                    <input type="color" aria-label={`Colour of object ${i + 1}`} className="h-10 w-10 cursor-pointer rounded border border-line bg-transparent p-0.5" value={it.color} onChange={(e) => setNew(i, { color: e.target.value })} />
+                    <Field label={`Object ${i + 1}`}>
+                      <input className={inputClass} value={it.name} maxLength={40} onChange={(e) => setNew(i, { name: e.target.value })} />
+                    </Field>
+                    <Field label="Target">
+                      <input className={inputClass} type="number" min={1} value={it.target} onChange={(e) => setNew(i, { target: Number(e.target.value) })} />
+                    </Field>
+                    <div className="col-span-3 -mt-1 flex gap-2">
+                      <input className={inputClass} aria-label={`Task sentence for object ${i + 1}`} placeholder="Task sentence the robot is trained on" value={it.task_text} maxLength={200} onChange={(e) => setNew(i, { task_text: e.target.value })} />
+                      {newItems.length > 2 && (
+                        <Button variant="ghost" onClick={() => setNewItems((p) => p.filter((_, j) => j !== i))}>
+                          Remove
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {newItems.length < 8 && (
+                  <div>
+                    <Button variant="ghost" onClick={() => setNewItems((p) => [...p, { name: "", color: "#888888", task_text: "", target: 50 }])}>
+                      Add object
+                    </Button>
+                  </div>
+                )}
+                {newError && <ErrorBox>{newError}</ErrorBox>}
+                <div className="flex items-center justify-end gap-2">
+                  <Button onClick={() => setNewOpen(false)}>Cancel</Button>
+                  <Button variant="primary" disabled={!newValid} loading={newSaving} loadingText="Creating…" onClick={createNew}>
+                    Switch to new dataset
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
           <div className="border-t border-line pt-4">
             <div className="mb-3 text-sm font-semibold">Jetson</div>
             <div className="grid grid-cols-2 gap-3">

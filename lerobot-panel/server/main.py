@@ -250,6 +250,48 @@ def save_plan(items: list[PlanItem]) -> dict:
     return collection_state()
 
 
+class NewItem(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    task_text: str = Field(min_length=3, max_length=200)
+    target: int = Field(ge=1, le=10000)
+
+
+class NewDatasetRequest(BaseModel):
+    dataset: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=120)
+    items: list[NewItem] = Field(min_length=2, max_length=8)
+
+
+@app.post("/api/collection/new")
+def new_dataset(req: NewDatasetRequest) -> dict:
+    """Switch the panel to a new dataset with its own objects and tasks (the old plan file is kept)."""
+    if recorder.recording_dataset():
+        raise HTTPException(409, "A session is running. Finish it before starting a new dataset.")
+    if job.running:
+        raise HTTPException(409, "The dataset is being edited right now; wait for it to finish.")
+    try:
+        collection.new_plan(req.dataset, [i.model_dump() for i in req.items])
+    except collection.ConfigError as e:
+        raise HTTPException(400, str(e)) from e
+    return collection_state()
+
+
+class UploadTargets(BaseModel):
+    hub_repo_id: str = Field(default="", max_length=120)
+    rsync_dest: str = Field(default="", max_length=300)
+
+
+@app.put("/api/collection/upload")
+def save_upload_targets(req: UploadTargets) -> dict:
+    if uploader.running:
+        raise HTTPException(409, "An upload is running. Wait for it to finish.")
+    try:
+        collection.save_upload(req.hub_repo_id, req.rsync_dest)
+    except collection.ConfigError as e:
+        raise HTTPException(400, str(e)) from e
+    return collection_state()
+
+
 class UploadRequest(BaseModel):
     method: str = Field(pattern="^(hub|rsync)$")
     dry_run: bool = False

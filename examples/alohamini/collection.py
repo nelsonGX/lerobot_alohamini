@@ -196,6 +196,68 @@ def save_plan(items: list[dict], path: str | os.PathLike | None = None) -> Colle
     return load_config(path)
 
 
+def new_plan(dataset: str, items: list[dict], path: str | os.PathLike | None = None) -> CollectionConfig:
+    """Start a new dataset: replace the dataset name, objects and tasks (one task per item); other settings stay.
+
+    The previous plan is kept beside the file as `<stem>.<old dataset name>.yaml` so it can be restored by hand.
+    Each item is {name, color, task_text, target}; ids and slots are generated.
+    """
+    path = Path(path or os.environ.get("COLLECTION_CONFIG") or DEFAULT_CONFIG_PATH)
+    raw = yaml.safe_load(path.read_text())
+    if len(items) < 2:
+        raise ConfigError("A plan needs at least 2 objects")
+    slot_names = ["left", "right"] if len(items) == 2 else ["left", "center", "right"] + [
+        f"slot_{i}" for i in range(4, len(items) + 1)
+    ]
+    old_name = str(raw.get("dataset", ""))
+    raw["dataset"] = dataset.strip()
+    # Destinations that end in the old dataset name would send the new data to the old place.
+    up = raw.setdefault("upload", {})
+    if old_name and (rd := str(up.get("rsync_dest") or "").rstrip("/")).endswith("/" + old_name):
+        up["rsync_dest"] = rd[: -len(old_name)] + raw["dataset"]
+    if up.get("hub_repo_id") == old_name:
+        up["hub_repo_id"] = raw["dataset"]
+    raw["objects"], raw["tasks"] = [], []
+    for n, it in enumerate(items, 1):
+        oid = f"object_{n}"
+        raw["objects"].append({"id": oid, "name": str(it["name"]).strip(), "color": str(it["color"])})
+        raw["tasks"].append(
+            {"id": f"pick_{oid}", "text": str(it["task_text"]).strip(), "object": oid, "target": int(it["target"])}
+        )
+    raw["slots"] = slot_names[: len(items)]
+    header = "# Data-collection plan. Edited from the panel's Settings; see RECORDING.md for what each field does.\n"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(header + yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    try:
+        load_config(tmp)
+    except ConfigError:
+        tmp.unlink(missing_ok=True)
+        raise
+    old = load_config(path)
+    if old.dataset != raw["dataset"]:
+        backup = path.with_name(f"{path.stem}.{old.dataset.replace('/', '_')}{path.suffix}")
+        backup.write_text(path.read_text())
+    tmp.replace(path)
+    return load_config(path)
+
+
+def save_upload(hub_repo_id: str, rsync_dest: str, path: str | os.PathLike | None = None) -> CollectionConfig:
+    """Set where the dataset is uploaded to (either may be empty = that method is off). Other settings stay."""
+    path = Path(path or os.environ.get("COLLECTION_CONFIG") or DEFAULT_CONFIG_PATH)
+    hub, rsync = hub_repo_id.strip(), rsync_dest.strip()
+    if hub and not REPO_ID_RE.match(hub):
+        raise ConfigError("The Hugging Face repo must look like namespace/name")
+    if rsync and not re.match(r"^[A-Za-z0-9_.@:/~+-]+$", rsync):
+        raise ConfigError("The server destination must look like user@host:/path (letters, digits and _ . @ : / ~ + - only)")
+    raw = yaml.safe_load(path.read_text())
+    raw["upload"] = {**(raw.get("upload") or {}), "hub_repo_id": hub, "rsync_dest": rsync}
+    header = "# Data-collection plan. Edited from the panel's Settings; see RECORDING.md for what each field does.\n"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(header + yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    tmp.replace(path)
+    return load_config(path)
+
+
 # ---------------------------------------------------------------- counts and suggestion
 
 

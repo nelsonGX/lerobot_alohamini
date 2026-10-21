@@ -5,7 +5,7 @@ import { api, type CollectionState, type UploadState } from "@/lib/api";
 import { fmtAgo } from "@/lib/format";
 import { useLocalStorage } from "@/lib/hooks";
 import { useTopic } from "@/lib/live";
-import { Button, Card, ErrorBox, Modal, Spinner, StatusIcon } from "./ui";
+import { Button, Card, ErrorBox, Field, inputClass, Modal, Spinner, StatusIcon } from "./ui";
 
 type Method = "hub" | "rsync";
 
@@ -16,6 +16,29 @@ export function UploadCard({ collection, recording }: { collection: CollectionSt
   const [asking, setAsking] = useState<Method | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+
+  const [editing, setEditing] = useState(false);
+  const [hubDraft, setHubDraft] = useState("");
+  const [rsyncDraft, setRsyncDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const edit = () => {
+    setHubDraft(collection?.config.upload.hub_repo_id ?? "");
+    setRsyncDraft(collection?.config.upload.rsync_dest ?? "");
+    setError(null);
+    setEditing(true);
+  };
+  const saveTargets = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.saveUploadTargets(hubDraft, rsyncDraft);
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const cfg = collection?.config;
   const total = collection?.total_episodes ?? 0;
@@ -45,10 +68,14 @@ export function UploadCard({ collection, recording }: { collection: CollectionSt
   return (
     <Card title="Upload dataset">
       <div className="grid gap-3 text-sm">
+        <div>
+          <Button variant="ghost" size="sm" disabled={!!upload?.running} onClick={edit}>
+            Edit servers
+          </Button>
+        </div>
         {targets.length === 0 ? (
           <p className="text-ink-2">
-            Upload is not set up yet. Add a Hugging Face repo (<code className="font-mono text-xs">upload.hub_repo_id</code>) or an rsync destination (
-            <code className="font-mono text-xs">upload.rsync_dest</code>) to <code className="font-mono text-xs">collection.yaml</code> and restart the panel.
+            Upload is not set up yet. Use <b>Edit servers</b> to add a Hugging Face repo or an rsync destination (<span className="font-mono text-xs">user@host:/path</span>).
           </p>
         ) : (
           <>
@@ -76,6 +103,24 @@ export function UploadCard({ collection, recording }: { collection: CollectionSt
         )}
         <UploadProgress upload={upload} />
       </div>
+
+      <Modal open={editing} onClose={() => setEditing(false)} title="Upload servers">
+        <div className="grid gap-3">
+          <Field label="Copy to GPU server (rsync)" hint="user@host:/path, the dataset folder on the server. Leave empty to turn off.">
+            <input className={`${inputClass} font-mono`} spellCheck={false} value={rsyncDraft} onChange={(e) => setRsyncDraft(e.target.value.trim())} />
+          </Field>
+          <Field label="Hugging Face repo (private)" hint="namespace/name. Leave empty to turn off.">
+            <input className={`${inputClass} font-mono`} spellCheck={false} value={hubDraft} onChange={(e) => setHubDraft(e.target.value.trim())} />
+          </Field>
+          {error && <ErrorBox>{error}</ErrorBox>}
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button onClick={() => setEditing(false)}>Cancel</Button>
+          <Button variant="primary" onClick={saveTargets} loading={saving} loadingText="Saving…">
+            Save
+          </Button>
+        </div>
+      </Modal>
 
       <Modal open={!!asking} onClose={() => setAsking(null)} title="Upload the dataset?">
         <div className="grid gap-3 text-sm text-ink-2">

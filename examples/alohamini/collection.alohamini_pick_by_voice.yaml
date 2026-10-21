@@ -1,0 +1,43 @@
+# Data-collection plan. Edited from the panel's Settings; see RECORDING.md for what each field does.
+dataset: alohamini/pick_by_voice
+default_target: 50
+objects:
+- id: red_cube
+  name: white box
+  color: '#ffffff'
+- id: blue_ball
+  name: gray tape
+  color: '#9e9e9e'
+- id: green_cup
+  name: trash bag
+  color: '#00ccff'
+slots:
+- left
+- center
+- right
+tasks:
+- id: pick_red_cube
+  text: pick up the white box's handler and drop on white area
+  object: red_cube
+  target: 50
+- id: pick_blue_ball
+  text: pick up the gray tape and drop on white area
+  object: blue_ball
+  target: 50
+- id: pick_green_cup
+  text: pick up the stacked trash bag and drop on white area
+  object: green_cup
+  target: 50
+quality:
+  min_episode_s: 3.0
+  min_fps_ratio: 0.9
+  max_gap_s: 0.3
+  max_stale_frac: 0.1
+  max_latency_p95_s: 0.25
+  min_arm_motion: 2.0
+  black_camera_frac: 0.2
+  time_limit_margin_s: 0.5
+upload:
+  hub_repo_id: ''
+  rsync_dest: 'root@140.136.155.73:/root/.cache/huggingface/lerobot/alohamini/pick_by_voice'
+checkpoint_every: 1
