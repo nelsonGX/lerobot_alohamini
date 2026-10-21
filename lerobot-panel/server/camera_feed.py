@@ -51,6 +51,9 @@ class CameraFeed:
         sock = ctx.socket(zmq.SUB)
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVHWM, 8)
+        # Detect a host that vanished without closing TCP (killed/restarted over flaky Wi-Fi) and reconnect.
+        sock.setsockopt(zmq.HEARTBEAT_IVL, 1000)
+        sock.setsockopt(zmq.HEARTBEAT_TIMEOUT, 3000)
         sock.setsockopt(zmq.SUBSCRIBE, b"camera/")
         sock.connect(endpoint)
         try:
