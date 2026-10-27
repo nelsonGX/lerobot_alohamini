@@ -7,6 +7,9 @@ const API_ORIGIN = process.env.PANEL_API_ORIGIN ?? "http://127.0.0.1:8000";
 
 export default function config(phase: string): NextConfig {
   const base: NextConfig = {
+    experimental: {
+      agentUpgrade: "security",
+    },
     turbopack: {
       rules: {
         "*.css": {
