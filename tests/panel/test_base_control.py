@@ -128,7 +128,7 @@ def test_agent_auth_and_stop_route(monkeypatch):
         assert client.post("/base/stop", headers=headers).status_code == 200
 
 
-@pytest.mark.parametrize("height", [None, 100])
+@pytest.mark.parametrize("height", [None, 0, 100])
 def test_connect_initializes_zero_speed_without_homing(monkeypatch, height):
     from types import SimpleNamespace
     from lerobot.motors import feetech
@@ -187,3 +187,11 @@ def test_panel_proxy_uses_persisted_robot_model(monkeypatch):
         assert client.post("/api/base/connect", json={"lift_height_mm": 100}).status_code == 200
         assert calls[-1][2]["robot_model"] == main.load_settings().robot_model
         assert client.post("/api/base/stop").status_code == 200
+
+
+def test_lift_can_rise_from_zero_but_cannot_descend(control):
+    control.height = mod.BaseConnect(lift_height_mm=0).lift_height_mm
+    command(control, 1, "up")
+    assert control._velocities()["lift"] < 0
+    command(control, 2, "down")
+    assert control._velocities()["lift"] == 0

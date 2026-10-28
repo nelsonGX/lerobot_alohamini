@@ -120,12 +120,12 @@ export function BaseControls({ available }: { available: boolean }) {
       {(error || status.error || status.data?.error) && <ErrorBox>{error || status.error || status.data?.error}</ErrorBox>}
       <div className="my-3 flex flex-wrap items-end gap-3">
         <Field label="Current lift height (mm, optional)">
-          <input className={inputClass} type="number" min={5} max={600} step="any" value={height}
+          <input className={inputClass} type="number" min={0} max={600} step="any" value={height}
             disabled={status.data?.connected || busy} placeholder="Leave blank for wheels only"
             onChange={e => setHeight(e.target.value)} />
         </Field>
         <Button variant="primary" loading={busy} disabled={!available || !!status.data?.connected ||
-          (!!height.trim() && (!Number.isFinite(Number(height)) || Number(height) < 5 || Number(height) > 600))}
+          (!!height.trim() && (!Number.isFinite(Number(height)) || Number(height) < 0 || Number(height) > 600))}
           onClick={connect}>Connect wheels{height.trim() ? " & lift" : ""}</Button>
         <Button variant="danger" onClick={stop}>Stop & disconnect</Button>
       </div>

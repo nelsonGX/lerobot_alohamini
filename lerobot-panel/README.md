@@ -53,9 +53,9 @@ The agent runs the robot host, so the host keeps running if the panel restarts; 
     Keep the arm host's `--no_base` setting. The base controller is identified by
     `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79018624-if00`, avoiding changing ACM indices.
     Leave the height blank for wheels only; to enable the lift, enter its measured
-    height in mm above the lowest position (5–600 mm). No automatic homing occurs.
+    height in mm above the lowest position (0–600 mm). No automatic homing occurs.
     Movement uses 3 cm/s translation, 10°/s rotation and 1 cm/s lift speed. The lift
-    is bounded to 5–595 mm from the supplied reference; current/temperature faults,
+    blocks descent at or below 5 mm and ascent at or above 595 mm from the supplied reference; current/temperature faults,
     a 0.5-second command timeout, or a 3-second continuous hold stop motion and require
     reconnecting. Stop keeps lift holding torque enabled. Serial loss can prevent
     delivery of a stop command; the UI reports that failure. Manual base movements

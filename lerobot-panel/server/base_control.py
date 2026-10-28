@@ -18,7 +18,7 @@ NAMES = ("left_wheel", "back_wheel", "right_wheel", "lift")
 class BaseConnect(BaseModel):
     robot_model: str = Field(default="alohamini1", pattern="^alohamini(1|2|2pro)$")
     # No homing or guessed absolute height: null allows wheels only.
-    lift_height_mm: float | None = Field(default=None, ge=5, le=600, allow_inf_nan=False)
+    lift_height_mm: float | None = Field(default=None, ge=0, le=600, allow_inf_nan=False)
 
 
 class BaseCommand(BaseModel):
