@@ -92,6 +92,36 @@ def test_commands_are_literal_argv_and_match_modes(tmp_path):
     assert "--robot.remote_ip=10.0.0.2" in cmd
 
 
+def test_chunking_and_continuous_options_reach_commands(tmp_path):
+    train = gpu_jobs.JobRequest(
+        kind="train", dataset="team/data", policy="smolvla", chunk_size=50, n_action_steps=10
+    )
+    cmd = gpu_jobs.command(train, tmp_path)
+    assert "--policy.chunk_size=50" in cmd and "--policy.n_action_steps=10" in cmd
+    sim = gpu_jobs.JobRequest(kind="sim_eval", checkpoint="team/act", temporal_ensemble_coeff=0.01)
+    cmd = gpu_jobs.command(sim, tmp_path)
+    assert "--policy.n_action_steps=1" in cmd and "--policy.temporal_ensemble_coeff=0.01" in cmd
+    live = gpu_jobs.JobRequest(
+        kind="robot_eval",
+        checkpoint="team/smolvla",
+        robot_ready=True,
+        continuous=True,
+        record=False,
+        inference="rtc",
+        rtc_queue_threshold=40,
+    )
+    cmd = gpu_jobs.command(live, tmp_path)
+    assert "--eval.continuous=true" in cmd and "--dataset.record=false" in cmd
+    assert "--inference.type=rtc" in cmd and "--inference.rtc.queue_threshold=40" in cmd
+    assert not any(arg.startswith(("--dataset.repo_id", "--policy.n_action_steps")) for arg in cmd)
+    recorded = gpu_jobs.JobRequest(
+        kind="robot_eval", checkpoint="team/act", dataset="team/eval", robot_ready=True, n_action_steps=5
+    )
+    cmd = gpu_jobs.command(recorded, tmp_path)
+    assert "--dataset.repo_id=team/eval" in cmd and "--policy.n_action_steps=5" in cmd
+    assert "--inference.type=sync" in cmd
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -101,6 +131,26 @@ def test_commands_are_literal_argv_and_match_modes(tmp_path):
         {"kind": "train", "dataset": "team/data", "command": "anything"},
         {"kind": "sim_eval"},
         {"kind": "robot_eval", "checkpoint": "team/policy", "dataset": "team/eval"},
+        {"kind": "robot_eval", "checkpoint": "team/policy", "robot_ready": True},
+        {"kind": "train", "dataset": "team/data", "checkpoint": "team/policy", "chunk_size": 20},
+        {"kind": "train", "dataset": "team/data", "policy": "diffusion", "chunk_size": 20},
+        {"kind": "train", "dataset": "team/data", "chunk_size": 10, "n_action_steps": 20},
+        {"kind": "sim_eval", "checkpoint": "team/policy", "continuous": True},
+        {"kind": "sim_eval", "checkpoint": "team/policy", "inference": "rtc"},
+        {
+            "kind": "sim_eval",
+            "checkpoint": "team/policy",
+            "temporal_ensemble_coeff": 0.01,
+            "n_action_steps": 5,
+        },
+        {
+            "kind": "robot_eval",
+            "checkpoint": "team/policy",
+            "record": False,
+            "robot_ready": True,
+            "inference": "rtc",
+            "n_action_steps": 5,
+        },
     ],
 )
 def test_invalid_jobs_rejected(payload):
@@ -201,9 +251,11 @@ def test_reconnect_same_server_with_new_token_during_live_eval(tmp_path, monkeyp
     old = {"host": "gpu.local", "port": 8766, "token": "old-token"}
     gpu_remote.CONNECTION_FILE.write_text(json.dumps(old))
     gpu_remote.LIVE_FILE.write_text("{}")
+
     def respond(method, path, target=None):
         assert target.token == "new-token"
         return {"agent": "gpu", "jobs": [{"kind": "robot_eval", "state": "running"}]}
+
     monkeypatch.setattr(gpu_remote, "call", respond)
     gpu_remote.connect(gpu_remote.Connection(**{**old, "token": "new-token"}))
     assert gpu_remote.connection().token == "new-token"
@@ -215,25 +267,37 @@ def test_panel_live_eval_uses_configured_robot_and_blocks_other_operations(tmp_p
     monkeypatch.setattr(gpu_remote, "DATA_DIR", tmp_path)
     monkeypatch.setattr(gpu_remote, "LIVE_FILE", tmp_path / "live.json")
     monkeypatch.setattr(gpu_remote, "connection", lambda: True)
-    monkeypatch.setattr(main, "load_settings", lambda: main.Settings(jetson_ip="10.0.0.9", robot_model="alohamini2"))
+    monkeypatch.setattr(
+        main, "load_settings", lambda: main.Settings(jetson_ip="10.0.0.9", robot_model="alohamini2")
+    )
     monkeypatch.setattr(main.recorder, "recording_dataset", lambda: None)
     monkeypatch.setattr(main.controls, "leader_users", lambda: [])
     monkeypatch.setattr(main.controls, "get", lambda name: None)
     monkeypatch.setattr(main.controls, "jetson_status", lambda settings: {"host_listening": True})
     dispatched = []
+
     def respond(method, path, body=None):
         if method == "POST":
             dispatched.append(body)
             return {"id": "123"}
         return {"jobs": [{"kind": "robot_eval", "state": "running"}]}
+
     monkeypatch.setattr(gpu_remote, "call", respond)
     with TestClient(main.app) as c:
-        body = {"kind": "robot_eval", "dataset": "team/eval", "checkpoint": "team/policy", "robot_ready": True, "robot_ip": "wrong.local"}
+        body = {
+            "kind": "robot_eval",
+            "dataset": "team/eval",
+            "checkpoint": "team/policy",
+            "robot_ready": True,
+            "robot_ip": "wrong.local",
+        }
         assert c.post("/api/gpu/jobs", json=body).status_code == 200
         assert dispatched[0]["robot_ip"] == "10.0.0.9"
         assert dispatched[0]["robot_model"] == "alohamini2"
         assert c.post("/api/teleop/start").status_code == 409
-        assert c.post("/api/recorder/start", json={"operator": "test", "episode_time_s": 10}).status_code == 409
+        assert (
+            c.post("/api/recorder/start", json={"operator": "test", "episode_time_s": 10}).status_code == 409
+        )
         assert c.post("/api/calibrate/start", json={"target": "follower"}).status_code == 409
         assert c.post("/api/host/stop").status_code == 409
         assert c.put("/api/settings", json={}).status_code == 409
@@ -244,6 +308,14 @@ def test_panel_refuses_eval_when_teleop_running(monkeypatch):
     monkeypatch.setattr(main.recorder, "recording_dataset", lambda: None)
     monkeypatch.setattr(main.controls, "leader_users", lambda: ["Teleoperation"])
     with TestClient(main.app) as c:
-        res = c.post("/api/gpu/jobs", json={"kind": "robot_eval", "dataset": "team/eval", "checkpoint": "team/policy", "robot_ready": True})
+        res = c.post(
+            "/api/gpu/jobs",
+            json={
+                "kind": "robot_eval",
+                "dataset": "team/eval",
+                "checkpoint": "team/policy",
+                "robot_ready": True,
+            },
+        )
         assert res.status_code == 409
         assert "Stop recording" in res.json()["detail"]

@@ -4,7 +4,9 @@ import argparse
 import inspect
 import logging
 import math
+import signal
 import time
+from contextlib import contextmanager
 
 import lerobot.robots.alohamini  # noqa: F401 — registers alohamini_client robot type
 from lerobot.configs.policies import PreTrainedConfig
@@ -45,6 +47,48 @@ def parse_bool(value: str | bool) -> bool:
     raise argparse.ArgumentTypeError("Expected true or false.")
 
 
+@contextmanager
+def defer_interrupt():
+    """Finish writing an episode before honoring Ctrl+C, so stopping never leaves it half-saved."""
+    interrupted = []
+    previous = signal.signal(signal.SIGINT, lambda *_: interrupted.append(True))
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    if interrupted:
+        raise KeyboardInterrupt
+
+
+def apply_action_overrides(
+    policy_cfg, n_action_steps: int | None, temporal_ensemble_coeff: float | None
+) -> None:
+    """Make the policy re-plan more (or less) often without retraining.
+
+    A chunking policy predicts ``chunk_size`` (diffusion: ``horizon``) actions per call and
+    executes ``n_action_steps`` of them before calling the model again. The chunk length is
+    fixed by the trained weights; how much of it is executed is an inference-time choice.
+    """
+    if temporal_ensemble_coeff is not None:
+        if not hasattr(policy_cfg, "temporal_ensemble_coeff"):
+            raise ValueError(f"Temporal ensembling is only supported by ACT, not '{policy_cfg.type}'.")
+        policy_cfg.temporal_ensemble_coeff = temporal_ensemble_coeff
+        n_action_steps = 1  # ACT ensembles a fresh chunk on every control step.
+    if n_action_steps is None:
+        return
+    if not hasattr(policy_cfg, "n_action_steps"):
+        raise ValueError(f"Policy type '{policy_cfg.type}' has no n_action_steps to override.")
+    if hasattr(policy_cfg, "chunk_size"):
+        limit = policy_cfg.chunk_size
+    elif hasattr(policy_cfg, "horizon"):
+        limit = policy_cfg.horizon - getattr(policy_cfg, "n_obs_steps", 1) + 1
+    else:
+        limit = None
+    if n_action_steps < 1 or (limit is not None and n_action_steps > limit):
+        raise ValueError(f"--policy.n_action_steps must be between 1 and {limit} for this checkpoint.")
+    policy_cfg.n_action_steps = n_action_steps
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate AlohaMini robot with a pretrained policy")
     parser.add_argument("--eval.n_episodes", "--num_episodes", dest="num_episodes", type=int, default=2)
@@ -66,8 +110,41 @@ def main():
         default="robot task",
     )
     parser.add_argument("--policy.path", "--hf_model_id", dest="policy_path", type=str, required=True)
+    parser.add_argument("--dataset.repo_id", "--hf_dataset_id", dest="dataset_repo_id", type=str, default="")
     parser.add_argument(
-        "--dataset.repo_id", "--hf_dataset_id", dest="dataset_repo_id", type=str, required=True
+        "--dataset.record",
+        dest="record",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Save evaluation episodes as a dataset. false runs the policy without recording.",
+    )
+    parser.add_argument(
+        "--eval.continuous",
+        dest="continuous",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Run until stopped (Ctrl+C) instead of --eval.n_episodes. Without recording the policy runs "
+        "as one uninterrupted episode; with recording, episodes of --eval.episode_time_s are saved "
+        "back to back with no reset wait.",
+    )
+    parser.add_argument(
+        "--policy.n_action_steps",
+        dest="n_action_steps",
+        type=int,
+        default=None,
+        help="Actions executed from each predicted chunk before the policy runs again. Lower = more "
+        "frequent predictions (fps / n_action_steps per second). Default: the checkpoint's value.",
+    )
+    parser.add_argument(
+        "--policy.temporal_ensemble_coeff",
+        dest="temporal_ensemble_coeff",
+        type=float,
+        default=None,
+        help="ACT only: predict every control step and blend overlapping chunks (implies n_action_steps=1).",
     )
     parser.add_argument(
         "--dataset.push_to_hub",
@@ -141,12 +218,15 @@ def main():
     args = parser.parse_args()
     if args.reset_time < 0:
         parser.error("--eval.reset_time_s must be non-negative")
+    if args.record and not args.dataset_repo_id:
+        parser.error("--dataset.repo_id is required unless --dataset.record=false")
 
     device = str(auto_select_torch_device())
 
     # === Policy ===
     policy_cfg = PreTrainedConfig.from_pretrained(args.policy_path)
     policy_cfg.pretrained_path = args.policy_path
+    apply_action_overrides(policy_cfg, args.n_action_steps, args.temporal_ensemble_coeff)
     policy_class = get_policy_class(policy_cfg.type)
     policy = policy_class.from_pretrained(args.policy_path, config=policy_cfg)
 
@@ -209,20 +289,22 @@ def main():
     ordered_action_keys = list(action_features_hw.keys())
 
     # === Dataset ===
-    dataset = LeRobotDataset.create(
-        repo_id=args.dataset_repo_id,
-        fps=args.fps,
-        features=dataset_features,
-        robot_type=robot.name,
-        use_videos=True,
-        image_writer_threads=4,
-    )
+    dataset = None
+    if args.record:
+        dataset = LeRobotDataset.create(
+            repo_id=args.dataset_repo_id,
+            fps=args.fps,
+            features=dataset_features,
+            robot_type=robot.name,
+            use_videos=True,
+            image_writer_threads=4,
+        )
 
     # === Policy processors (needs dataset stats) ===
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=policy_cfg,
         pretrained_path=args.policy_path,
-        dataset_stats=dataset.meta.stats,
+        dataset_stats=dataset.meta.stats if dataset is not None else None,
         preprocessor_overrides={"device_processor": {"device": device}},
     )
 
@@ -242,11 +324,33 @@ def main():
     )
 
     # init_rerun(session_name="alohamini_evaluate")
+    steps = getattr(policy_cfg, "n_action_steps", None)
+    if args.inference_type == "sync" and isinstance(steps, int) and steps > 0:
+        ensemble = getattr(policy_cfg, "temporal_ensemble_coeff", None)
+        print(
+            f"[EVAL] Policy predicts every {steps} step(s) = {args.fps / steps:.2f} Hz"
+            + (f" (temporal ensembling {ensemble})" if ensemble is not None else ""),
+            flush=True,
+        )
+    elif args.inference_type == "rtc":
+        print(
+            f"[EVAL] RTC: new chunk of {getattr(policy_cfg, 'chunk_size', '?')} requested once "
+            f"{args.rtc_queue_threshold} queued actions remain (execution horizon {args.rtc_execution_horizon})",
+            flush=True,
+        )
+    print(
+        "[EVAL] Mode: "
+        + ("run until stopped" if args.continuous else f"{args.num_episodes} episode(s)")
+        + (f", recording to {args.dataset_repo_id}" if dataset is not None else ", not recording"),
+        flush=True,
+    )
     log_say("Starting evaluation")
 
     interpolator = ActionInterpolator(multiplier=args.interpolation_multiplier)
     control_interval = interpolator.get_control_interval(args.fps)
     recorded = 0
+    # Continuous without recording never needs an episode boundary.
+    episode_time = math.inf if args.continuous and dataset is None else args.episode_time
     safety_guard = EvaluationSafetyGuard()
     engage_ramp = EngageRamp(max_step=args.engage_ramp_speed / (args.fps * args.interpolation_multiplier))
 
@@ -279,8 +383,9 @@ def main():
         print(flush=True)
 
     try:
-        while recorded < args.num_episodes:
-            log_say(f"Eval episode {recorded + 1} of {args.num_episodes}")
+        while args.continuous or recorded < args.num_episodes:
+            total = "" if args.continuous else f" of {args.num_episodes}"
+            log_say(f"Eval episode {recorded + 1}{total}")
             stop_inference(engine)
             engine.reset()
             engine.start()
@@ -291,7 +396,7 @@ def main():
             restart_pending = False
             episode_frames = 0
 
-            while (time.perf_counter() - start) < args.episode_time:
+            while (time.perf_counter() - start) < episode_time:
                 loop_start = time.perf_counter()
 
                 obs_raw = robot.get_observation()
@@ -349,7 +454,7 @@ def main():
                     action_dict = {k: interp_action[i].item() for i, k in enumerate(ordered_action_keys)}
                     action_dict = engage_ramp.apply(action_dict, obs_raw)
                     sent = robot.send_action(robot_action_processor((action_dict, obs_raw)))
-                    if sent and robot.observation_updated:
+                    if sent and robot.observation_updated and dataset is not None:
                         action_frame = build_dataset_frame(dataset_features, action_dict, prefix=ACTION)
                         dataset.add_frame({**obs_frame, **action_frame, "task": args.task_description})
                         episode_frames += 1
@@ -359,31 +464,41 @@ def main():
                     precise_sleep(sleep_t)
 
             engine.pause()
-            if episode_frames:
-                dataset.save_episode()
+            if dataset is None:
+                pass
+            elif episode_frames:
+                with defer_interrupt():
+                    dataset.save_episode()
+                print(f"[EVAL] Saved episode {recorded + 1} ({episode_frames} frames)", flush=True)
             else:
                 logging.warning("No evaluation frames collected; skipping empty episode.")
             recorded += 1
-            if recorded < args.num_episodes:
+            if not args.continuous and recorded < args.num_episodes:
                 reset_environment(recorded + 1)
     finally:
-        engine.pause()
+        # A second Ctrl+C from the panel's stop escalation must not cut the hold/save below short.
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            robot.send_action(hold_action(robot.last_remote_state))
-        finally:
+            engine.pause()
             try:
-                engine.stop()
+                robot.send_action(hold_action(robot.last_remote_state))
             finally:
                 try:
-                    if dataset.has_pending_frames():
-                        dataset.save_episode()
+                    engine.stop()
                 finally:
                     try:
-                        dataset.finalize()
+                        if dataset is not None and dataset.has_pending_frames():
+                            dataset.save_episode()
                     finally:
-                        robot.disconnect()
+                        try:
+                            if dataset is not None:
+                                dataset.finalize()
+                        finally:
+                            robot.disconnect()
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
     log_say("Evaluation complete")
-    if args.push_to_hub:
+    if args.push_to_hub and dataset is not None:
         dataset.push_to_hub()
 
 

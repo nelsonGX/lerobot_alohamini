@@ -215,3 +215,19 @@ def test_fresh_feedback_needs_no_extra_round_trip():
     observation = {"joint.pos": 1.0}
     assert EvaluationSafetyGuard().check_observation(robot, observation) == (observation, None)
     robot.refresh_observation.assert_not_called()
+
+
+def test_action_overrides_respect_trained_chunk():
+    act = SimpleNamespace(type="act", chunk_size=100, n_action_steps=100, temporal_ensemble_coeff=None)
+    evaluate_bi.apply_action_overrides(act, 10, None)
+    assert act.n_action_steps == 10
+    evaluate_bi.apply_action_overrides(act, None, 0.01)
+    assert (act.n_action_steps, act.temporal_ensemble_coeff) == (1, 0.01)
+    smolvla = SimpleNamespace(type="smolvla", chunk_size=50, n_action_steps=50)
+    with pytest.raises(ValueError, match="between 1 and 50"):
+        evaluate_bi.apply_action_overrides(smolvla, 51, None)
+    with pytest.raises(ValueError, match="only supported by ACT"):
+        evaluate_bi.apply_action_overrides(smolvla, None, 0.01)
+    diffusion = SimpleNamespace(type="diffusion", horizon=16, n_obs_steps=2, n_action_steps=8)
+    with pytest.raises(ValueError, match="between 1 and 15"):
+        evaluate_bi.apply_action_overrides(diffusion, 16, None)

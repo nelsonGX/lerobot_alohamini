@@ -124,6 +124,18 @@ as with the Jetson agent; the panel/agent connection uses HTTP.
    Its existing engage ramp and safety guard remain in use. The panel blocks conflicting
    recording, teleoperation and calibration operations while live evaluation runs.
    Camera previews require the panel-to-Jetson camera stream (5557).
+   **Run length**: *Until I stop it* runs the policy non-stop until you press **Stop robot**
+   (`--eval.continuous`). Recording is optional (`--dataset.record`); when on, an episode is saved
+   every *Episode length* seconds with no reset wait, and the robot holds briefly while each is written.
+   A stop during a save lets the save finish first.
+4. **Prediction frequency** (simulation and live): a chunking policy predicts `chunk_size` actions
+   per model call and executes `n_action_steps` of them before predicting again. The chunk size is
+   fixed by the trained weights (set it under **Train → Action chunking** for new runs); lowering
+   *Steps per prediction* (`--policy.n_action_steps`) re-plans more often without retraining.
+   ACT can also use temporal ensembling (predict every step). For VLA policies (SmolVLA, π0, π0.5),
+   each prediction takes ~0.1–0.3 s and the in-loop engine pauses the robot for it, so use
+   **Background (RTC)**: it predicts in a background thread and requests a new chunk once
+   *N* actions remain (`--inference.rtc.queue_threshold`); higher N = more frequent predictions.
 
 One GPU job runs at a time. **Stop job** interrupts it, then terminates a hung process.
 Closing the browser or restarting the panel does not stop GPU jobs. Stopping the GPU

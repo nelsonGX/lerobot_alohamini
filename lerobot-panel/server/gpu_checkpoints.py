@@ -22,6 +22,9 @@ def _checkpoint(path: Path, root: Path) -> dict | None:
             "label": name,
             "step": int(name) if name.isdigit() else None,
             "policy": config.get("type", "unknown"),
+            # Diffusion calls its chunk a horizon.
+            "chunk_size": config.get("chunk_size", config.get("horizon")),
+            "n_action_steps": config.get("n_action_steps"),
             "modified_at": weights.stat().st_mtime,
         }
     except (OSError, ValueError, RuntimeError):

@@ -69,7 +69,7 @@ class Jobs:
         with self.lock:
             if any(p.running for p in self.procs.values()):
                 raise HTTPException(409, "A GPU job is already running. Stop it or wait for it to finish.")
-            if req.kind == "robot_eval" and (lerobot_home() / req.dataset).exists():
+            if req.kind == "robot_eval" and req.record and (lerobot_home() / req.dataset).exists():
                 raise HTTPException(
                     409, "This evaluation dataset already exists on the GPU server. Choose a new name."
                 )
@@ -245,7 +245,7 @@ def detail(job_id: str) -> dict:
         record["result"] = json.loads(result.read_text()) if result.is_file() else None
     except (OSError, ValueError):
         record["result"] = None
-    if record["kind"] == "robot_eval":
+    if record["kind"] == "robot_eval" and record["request"].get("record", True):
         record["dataset_path"] = str(lerobot_home() / record["request"]["dataset"])
     return record
 

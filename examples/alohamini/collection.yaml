@@ -15,7 +15,7 @@ tasks:
 - id: pick_object_1
   text: Pick up the black umbrella and put it in the box
   object: object_1
-  target: 100
+  target: 150
 - id: pick_object_2
   text: Pick up the gray tape and put it in the box
   object: object_2

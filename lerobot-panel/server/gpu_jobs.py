@@ -35,10 +35,23 @@ class JobRequest(BaseModel):
     robot_ip: str = Field(default="127.0.0.1", pattern=r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
     robot_model: Literal["alohamini1", "alohamini2", "alohamini2pro"] = "alohamini1"
     robot_ready: bool = False
+    # Action chunking. chunk_size is fixed by trained weights, so it is only set for new training runs;
+    # n_action_steps (actions executed per prediction) can also be lowered at evaluation time.
+    chunk_size: int | None = Field(default=None, ge=1, le=1000)
+    n_action_steps: int | None = Field(default=None, ge=1, le=1000)
+    temporal_ensemble_coeff: float | None = Field(default=None, ge=0, le=1)
+    # Live robot only. sync: the control loop calls the policy inline every n_action_steps steps.
+    # rtc: background inference (VLA policies such as smolvla/pi0/pi05) requests a new chunk once
+    # rtc_queue_threshold actions remain, so the robot keeps moving while the model runs.
+    inference: Literal["sync", "rtc"] = "sync"
+    rtc_queue_threshold: int | None = Field(default=None, ge=1, le=1000)
+    rtc_execution_horizon: int | None = Field(default=None, ge=1, le=1000)
+    continuous: bool = False
+    record: bool = True
 
     @model_validator(mode="after")
     def validate_job(self) -> JobRequest:
-        if self.kind in ("train", "robot_eval"):
+        if self.kind == "train" or (self.kind == "robot_eval" and self.record):
             import re
 
             if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*", self.dataset):
@@ -47,7 +60,44 @@ class JobRequest(BaseModel):
             raise ValueError("Choose a checkpoint or enter a model repository ID.")
         if self.kind == "robot_eval" and not self.robot_ready:
             raise ValueError("Confirm that the robot workspace is clear and an operator is ready.")
+        if self.chunk_size is not None:
+            if self.kind != "train" or self.checkpoint:
+                raise ValueError(
+                    "Chunk size is fixed by the trained model; set it only for new training runs."
+                )
+            if self.policy == "diffusion":
+                raise ValueError(
+                    "Diffusion uses a horizon instead of a chunk size; set n_action_steps instead."
+                )
+            if self.n_action_steps is not None and self.n_action_steps > self.chunk_size:
+                raise ValueError("Steps per prediction cannot exceed the chunk size.")
+        if self.temporal_ensemble_coeff is not None:
+            if self.kind == "train":
+                raise ValueError("Temporal ensembling is an evaluation setting.")
+            if self.n_action_steps not in (None, 1):
+                raise ValueError("Temporal ensembling predicts every step; leave steps per prediction at 1.")
+        if self.inference == "rtc":
+            if self.kind != "robot_eval":
+                raise ValueError("RTC inference is only available for live robot evaluation.")
+            if self.n_action_steps is not None or self.temporal_ensemble_coeff is not None:
+                raise ValueError("RTC sets its own re-planning; use the queue threshold instead.")
+        elif self.rtc_queue_threshold is not None or self.rtc_execution_horizon is not None:
+            raise ValueError("RTC options require RTC inference.")
+        if self.continuous and self.kind != "robot_eval":
+            raise ValueError("Only live robot evaluation can run until stopped.")
         return self
+
+
+def chunk_args(req: JobRequest) -> list[str]:
+    args = [f"--policy.chunk_size={req.chunk_size}"] if req.chunk_size is not None else []
+    if req.temporal_ensemble_coeff is not None:
+        return args + [
+            "--policy.n_action_steps=1",
+            f"--policy.temporal_ensemble_coeff={req.temporal_ensemble_coeff}",
+        ]
+    if req.n_action_steps is not None:
+        args.append(f"--policy.n_action_steps={req.n_action_steps}")
+    return args
 
 
 def command(req: JobRequest, output: Path) -> list[str]:
@@ -69,7 +119,7 @@ def command(req: JobRequest, output: Path) -> list[str]:
         ]
         if req.dataset_root:
             cmd += [f"--dataset.root={req.dataset_root}"]
-        return cmd
+        return cmd + chunk_args(req)
     if req.kind == "sim_eval":
         return [
             PYTHON,
@@ -82,12 +132,13 @@ def command(req: JobRequest, output: Path) -> list[str]:
             f"--eval.n_episodes={req.episodes}",
             f"--eval.batch_size={min(req.batch_size, req.episodes)}",
             f"--output_dir={output}",
+            *chunk_args(req),
         ]
-    return [
+    cmd = [
         PYTHON,
         str(REPO_ROOT / "examples/alohamini/evaluate_bi.py"),
         f"--policy.path={req.checkpoint}",
-        f"--dataset.repo_id={req.dataset}",
+        f"--dataset.record={str(req.record).lower()}",
         "--dataset.push_to_hub=false",
         f"--dataset.single_task={req.task}",
         f"--robot.remote_ip={req.robot_ip}",
@@ -96,4 +147,14 @@ def command(req: JobRequest, output: Path) -> list[str]:
         f"--eval.episode_time_s={req.episode_time_s}",
         f"--eval.reset_time_s={req.reset_time_s}",
         f"--fps={req.fps}",
+        f"--eval.continuous={str(req.continuous).lower()}",
+        f"--inference.type={req.inference}",
+        *chunk_args(req),
     ]
+    if req.rtc_queue_threshold is not None:
+        cmd.append(f"--inference.rtc.queue_threshold={req.rtc_queue_threshold}")
+    if req.rtc_execution_horizon is not None:
+        cmd.append(f"--inference.rtc.execution_horizon={req.rtc_execution_horizon}")
+    if req.record:
+        cmd.append(f"--dataset.repo_id={req.dataset}")
+    return cmd
