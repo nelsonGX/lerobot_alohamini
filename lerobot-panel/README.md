@@ -126,8 +126,15 @@ as with the Jetson agent; the panel/agent connection uses HTTP.
    Camera previews require the panel-to-Jetson camera stream (5557).
    **Run length**: *Until I stop it* runs the policy non-stop until you press **Stop robot**
    (`--eval.continuous`). Recording is optional (`--dataset.record`); when on, an episode is saved
-   every *Episode length* seconds with no reset wait, and the robot holds briefly while each is written.
-   A stop during a save lets the save finish first.
+   when you end it (or at *Maximum episode length*) with no reset wait, and the robot holds briefly
+   while each is written. A stop during a save lets the save finish first.
+   **Episode controls**: while an episode runs, **Success** / **Fail** end it with a verdict,
+   **End episode** ends it without one, and **Discard & redo** throws it away and runs it again.
+   Between episodes, **Start now** skips the reset countdown and the last verdict can be changed.
+   *Start each episode myself* (`--eval.wait_for_start`) replaces the reset timer with waiting for
+   **Start**. The panel sends these as lines on the script's stdin (`--eval.panel_control`); verdicts
+   and the success rate are written to the run's `eval_info.json` (shown under *Evaluation results*)
+   and, when recording, to the dataset's `meta/eval_outcomes.json`.
 4. **Prediction frequency** (simulation and live): a chunking policy predicts `chunk_size` actions
    per model call and executes `n_action_steps` of them before predicting again. The chunk size is
    fixed by the trained weights (set it under **Train → Action chunking** for new runs); lowering

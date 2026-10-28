@@ -5,7 +5,7 @@ import { useCallback, useState, type ReactNode } from "react";
 import { Button, Card, ErrorBox, Field, inputClass, Modal, NumberInput, Segmented, Select, StatusIcon, Toggle } from "@/components/ui";
 import { CameraPreview } from "@/components/CameraPreview";
 import { CheckpointPicker, useCheckpoints } from "@/components/CheckpointPicker";
-import { ActiveJob, isActive, JobDetail, JobList, type Job, type Kind } from "@/components/GpuJobs";
+import { ActiveJob, isActive, JobDetail, JobList, type EpisodeCommand, type Job, type Kind } from "@/components/GpuJobs";
 import { HostMonitor } from "@/components/HostMonitor";
 import { initialPrediction, isVla, PredictionControls, predictionPayload } from "@/components/PredictionControls";
 import { api, request } from "@/lib/api";
@@ -27,7 +27,7 @@ const initialForm = {
   steps: 20000, batch: 8, saveFreq: 5000, workers: 4, trainPrediction: initialPrediction,
   // Evaluation
   checkpoint: "", env: "aloha" as keyof typeof envTasks, simTask: envTasks.aloha, episodes: 10, parallel: 8,
-  robotTask: "", continuous: true, record: false, evalDataset: "", duration: 60, reset: 10, evalPrediction: initialPrediction,
+  robotTask: "", continuous: true, record: false, evalDataset: "", duration: 60, reset: 10, waitForStart: false, evalPrediction: initialPrediction,
 };
 type Form = typeof initialForm;
 
@@ -89,7 +89,7 @@ export default function TrainPage() {
       steps: form.steps, batch_size: kind === "sim_eval" ? form.parallel : form.batch, save_freq: form.saveFreq, num_workers: form.workers,
       env: form.env, task: live ? form.robotTask : form.simTask,
       episodes: form.episodes, episode_time_s: form.duration, reset_time_s: form.reset, robot_ready: ready,
-      continuous: live && form.continuous, record: !live || form.record,
+      continuous: live && form.continuous, record: !live || form.record, wait_for_start: live && form.waitForStart,
       ...prediction,
     });
     setReady(false); setSelected(null); await status.refresh();
@@ -97,6 +97,11 @@ export default function TrainPage() {
   const stop = (id: string) => run(async () => {
     await request(`/api/gpu/jobs/${id}/stop`, "POST"); await status.refresh(); await active.refresh();
   });
+  const episodeCommand = async (id: string, command: EpisodeCommand) => {
+    setError(null);
+    try { await request(`/api/gpu/jobs/${id}/command`, "POST", { command }); await active.refresh(); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); throw e; }
+  };
 
   const blocked = !configured ? "Connect a GPU server first."
     : status.error ? "The GPU server is not responding."
@@ -126,7 +131,7 @@ export default function TrainPage() {
         onDone={async () => { setConnecting(false); setSelected(null); await connection.refresh(); await status.refresh(); }} />
     </Modal>
 
-    {activeJob && <ActiveJob job={activeJob} busy={busy} onStop={() => stop(activeJob.id)} />}
+    {activeJob && <ActiveJob job={activeJob} busy={busy} onStop={() => stop(activeJob.id)} onCommand={c => episodeCommand(activeJob.id, c)} />}
 
     <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,400px)]">
       <form className="rounded-lg border border-line bg-surface" onSubmit={e => { e.preventDefault(); start(); }}>
@@ -206,20 +211,25 @@ export default function TrainPage() {
               <Segmented label="Run length" value={form.continuous ? "continuous" : "episodes"} onChange={v => set({ continuous: v === "continuous" })}
                 options={[{ value: "continuous", label: "Until I stop it" }, { value: "episodes", label: "Fixed episodes" }]} />
               <Toggle checked={form.record} onChange={v => set({ record: v })} label="Record evaluation dataset"
-                description={form.continuous ? "Saves an episode every N seconds; the robot holds still briefly while each one is written." : "Saves each episode on the GPU server."} />
+                description={form.continuous ? "Saves an episode when you end it (or at the maximum length); the robot holds still briefly while each one is written." : "Saves each episode on the GPU server."} />
               {form.record && <Field label="New dataset" hint="Must not exist yet on the GPU server.">
                 <div className="flex gap-2">
                   <input required className={`${inputClass} font-mono`} value={form.evalDataset} onChange={e => set({ evalDataset: e.target.value })} placeholder="namespace/eval_run_001" />
                   <Button type="button" onClick={suggestEvalName}>New name</Button>
                 </div>
               </Field>}
+              <Toggle checked={form.waitForStart} onChange={v => set({ waitForStart: v })} label="Start each episode myself"
+                description="After each episode the robot waits until you press Start, instead of starting again after a reset timer." />
               {form.continuous
-                ? form.record && <Field label="Episode length"><NumberInput value={form.duration} min={1} max={600} step={10} suffix="s" presets={[30, 60, 120, 300]} onChange={v => set({ duration: v })} /></Field>
-                : <div className="grid gap-3 sm:grid-cols-3">
+                ? form.record && <Field label="Maximum episode length" hint="End episodes early with Success, Fail or End episode while it runs.">
+                  <NumberInput value={form.duration} min={1} max={600} step={10} suffix="s" presets={[30, 60, 120, 300]} onChange={v => set({ duration: v })} />
+                </Field>
+                : <div className={`grid gap-3 ${form.waitForStart ? "sm:grid-cols-2" : "sm:grid-cols-3"}`}>
                   <Field label="Episodes"><NumberInput value={form.episodes} min={1} max={10000} onChange={v => set({ episodes: v })} /></Field>
-                  <Field label="Episode length"><NumberInput value={form.duration} min={1} max={600} step={10} suffix="s" onChange={v => set({ duration: v })} /></Field>
-                  <Field label="Reset time"><NumberInput value={form.reset} min={0} max={600} step={5} suffix="s" onChange={v => set({ reset: v })} /></Field>
+                  <Field label="Maximum episode length"><NumberInput value={form.duration} min={1} max={600} step={10} suffix="s" onChange={v => set({ duration: v })} /></Field>
+                  {!form.waitForStart && <Field label="Reset time"><NumberInput value={form.reset} min={0} max={600} step={5} suffix="s" onChange={v => set({ reset: v })} /></Field>}
                 </div>}
+              <p className="text-xs text-muted">While it runs, mark each episode <b>Success</b> or <b>Fail</b> to end it, or <b>Discard &amp; redo</b> it. Verdicts are saved as eval_info.json{form.record ? " and in the dataset's meta/eval_outcomes.json" : ""}.</p>
             </Section>
           </>}
 

@@ -13,6 +13,14 @@ from config import PYTHON, REPO_ROOT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class EpisodeCommand(BaseModel):
+    """Live evaluation: end the episode with a verdict, discard it, or start the next one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command: Literal["success", "fail", "end", "discard", "start"]
+
+
 class JobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -48,6 +56,8 @@ class JobRequest(BaseModel):
     rtc_execution_horizon: int | None = Field(default=None, ge=1, le=1000)
     continuous: bool = False
     record: bool = True
+    # Live robot only: between episodes, hold until the operator presses Start instead of a reset timer.
+    wait_for_start: bool = False
 
     @model_validator(mode="after")
     def validate_job(self) -> JobRequest:
@@ -85,6 +95,8 @@ class JobRequest(BaseModel):
             raise ValueError("RTC options require RTC inference.")
         if self.continuous and self.kind != "robot_eval":
             raise ValueError("Only live robot evaluation can run until stopped.")
+        if self.wait_for_start and self.kind != "robot_eval":
+            raise ValueError("Only live robot evaluation waits for the operator between episodes.")
         return self
 
 
@@ -148,6 +160,9 @@ def command(req: JobRequest, output: Path) -> list[str]:
         f"--eval.reset_time_s={req.reset_time_s}",
         f"--fps={req.fps}",
         f"--eval.continuous={str(req.continuous).lower()}",
+        "--eval.panel_control=true",
+        f"--eval.wait_for_start={str(req.wait_for_start).lower()}",
+        f"--output_dir={output}",
         f"--inference.type={req.inference}",
         *chunk_args(req),
     ]

@@ -11,6 +11,7 @@ from functools import wraps
 import requests
 from config import DATA_DIR
 from fastapi import APIRouter, HTTPException
+from gpu_jobs import EpisodeCommand
 from pydantic import BaseModel, Field
 
 CONNECTION_FILE = DATA_DIR / "gpu_connection.json"
@@ -141,6 +142,11 @@ def checkpoints() -> dict:
 @router.post("/jobs/{job_id}/stop")
 def stop(job_id: str) -> dict:
     return call("POST", f"/jobs/{_job_id(job_id)}/stop")
+
+
+@router.post("/jobs/{job_id}/command")
+def episode_command(job_id: str, req: EpisodeCommand) -> dict:
+    return call("POST", f"/jobs/{_job_id(job_id)}/command", req.model_dump())
 
 
 def _job_id(value: str) -> str:

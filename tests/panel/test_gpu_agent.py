@@ -120,6 +120,10 @@ def test_chunking_and_continuous_options_reach_commands(tmp_path):
     cmd = gpu_jobs.command(recorded, tmp_path)
     assert "--dataset.repo_id=team/eval" in cmd and "--policy.n_action_steps=5" in cmd
     assert "--inference.type=sync" in cmd
+    assert "--eval.panel_control=true" in cmd and "--eval.wait_for_start=false" in cmd
+    assert f"--output_dir={tmp_path}" in cmd
+    manual = recorded.model_copy(update={"wait_for_start": True})
+    assert "--eval.wait_for_start=true" in gpu_jobs.command(manual, tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -137,6 +141,7 @@ def test_chunking_and_continuous_options_reach_commands(tmp_path):
         {"kind": "train", "dataset": "team/data", "chunk_size": 10, "n_action_steps": 20},
         {"kind": "sim_eval", "checkpoint": "team/policy", "continuous": True},
         {"kind": "sim_eval", "checkpoint": "team/policy", "inference": "rtc"},
+        {"kind": "sim_eval", "checkpoint": "team/policy", "wait_for_start": True},
         {
             "kind": "sim_eval",
             "checkpoint": "team/policy",
@@ -189,6 +194,27 @@ def test_only_one_job_and_stop_releases_slot(client, monkeypatch):
     assert client.post("/jobs", json=body).status_code == 409
     assert client.post(f"/jobs/{job_id}/stop").status_code == 200
     assert wait_done(client, job_id)["state"] == "stopped"
+
+
+def test_episode_commands_reach_running_live_eval_only(client, monkeypatch):
+    echo = "import sys\nprint('ready', flush=True)\nfor line in sys.stdin:\n    print('got', line.strip(), flush=True)"
+    monkeypatch.setattr(gpu_agent, "command", lambda req, output: [sys.executable, "-c", echo])
+    live = {"kind": "robot_eval", "checkpoint": "team/policy", "record": False, "robot_ready": True}
+    job_id = client.post("/jobs", json=live).json()["id"]
+    assert client.post(f"/jobs/{job_id}/command", json={"command": "rm -rf"}).status_code == 422
+    assert client.post(f"/jobs/{job_id}/command", json={"command": "success"}).status_code == 200
+    deadline = time.monotonic() + 6
+    while not any("got success" in line for line in client.get(f"/jobs/{job_id}").json()["lines"]):
+        assert time.monotonic() < deadline, "command never reached the program"
+        time.sleep(0.05)
+    client.post(f"/jobs/{job_id}/stop")
+    wait_done(client, job_id)
+    assert client.post(f"/jobs/{job_id}/command", json={"command": "start"}).status_code == 409
+
+    train = client.post("/jobs", json={"kind": "train", "dataset": "team/data"}).json()["id"]
+    assert client.post(f"/jobs/{train}/command", json={"command": "end"}).status_code == 409
+    client.post(f"/jobs/{train}/stop")
+    wait_done(client, train)
 
 
 def test_artifacts_and_interrupted_history(client, tmp_path):

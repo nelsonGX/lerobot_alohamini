@@ -5,8 +5,10 @@ import inspect
 import logging
 import math
 import signal
+import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import lerobot.robots.alohamini  # noqa: F401 — registers alohamini_client robot type
 from lerobot.configs.policies import PreTrainedConfig
@@ -30,8 +32,10 @@ from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
 try:
+    from .eval_control import EvalOutcomes, PanelControl, emit
     from .evaluation_safety import EngageRamp, EvaluationSafetyGuard, hold_action, stop_inference
 except ImportError:
+    from eval_control import EvalOutcomes, PanelControl, emit
     from evaluation_safety import EngageRamp, EvaluationSafetyGuard, hold_action, stop_inference
 
 
@@ -132,6 +136,33 @@ def main():
         "back to back with no reset wait.",
     )
     parser.add_argument(
+        "--eval.panel_control",
+        dest="panel_control",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Read episode commands (success, fail, end, discard, start) from stdin, one per line, "
+        "and print [EVAL:event] JSON progress lines. Used by the panel.",
+    )
+    parser.add_argument(
+        "--eval.wait_for_start",
+        dest="wait_for_start",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Between episodes, wait for a start command instead of --eval.reset_time_s "
+        "(requires --eval.panel_control).",
+    )
+    parser.add_argument(
+        "--output_dir",
+        dest="output_dir",
+        type=str,
+        default="",
+        help="Write eval_info.json with per-episode success/fail verdicts here.",
+    )
+    parser.add_argument(
         "--policy.n_action_steps",
         dest="n_action_steps",
         type=int,
@@ -220,6 +251,8 @@ def main():
         parser.error("--eval.reset_time_s must be non-negative")
     if args.record and not args.dataset_repo_id:
         parser.error("--dataset.repo_id is required unless --dataset.record=false")
+    if args.wait_for_start and not args.panel_control:
+        parser.error("--eval.wait_for_start needs --eval.panel_control to receive the start command")
 
     device = str(auto_select_torch_device())
 
@@ -349,43 +382,69 @@ def main():
     interpolator = ActionInterpolator(multiplier=args.interpolation_multiplier)
     control_interval = interpolator.get_control_interval(args.fps)
     recorded = 0
-    # Continuous without recording never needs an episode boundary.
+    # Continuous without recording never needs an episode boundary unless the panel ends one.
     episode_time = math.inf if args.continuous and dataset is None else args.episode_time
     safety_guard = EvaluationSafetyGuard()
     engage_ramp = EngageRamp(max_step=args.engage_ramp_speed / (args.fps * args.interpolation_multiplier))
+    control = PanelControl(sys.stdin if args.panel_control else None)
+    outcome_paths = [Path(args.output_dir) / "eval_info.json"] if args.output_dir else []
+    if dataset is not None:
+        outcome_paths.append(Path(dataset.root) / "meta" / "eval_outcomes.json")
+    outcomes = EvalOutcomes(outcome_paths)
+    total = None if args.continuous else args.num_episodes
+
+    def event(name: str, **fields) -> None:
+        if args.panel_control:
+            emit(name, total=total, **outcomes.counts(), **fields)
 
     def reset_environment(next_episode: int) -> None:
-        """Wait for manual scene reset while draining remote observations."""
-        if args.reset_time == 0:
+        """Wait for manual scene reset (timed, or until the panel says start) while draining observations."""
+        if args.reset_time == 0 and not args.wait_for_start:
             return
 
-        deadline = time.monotonic() + args.reset_time
+        deadline = None if args.wait_for_start else time.monotonic() + args.reset_time
+        label = f"{next_episode}/{total}" if total else f"{next_episode}"
+        event(
+            "waiting", episode=next_episode, until=None if deadline is None else time.time() + args.reset_time
+        )
+        if deadline is None:
+            print(f"[RESET] Prepare evaluation episode {label}, then press Start in the panel", flush=True)
         last_remaining = None
         while True:
-            remaining = max(0, math.ceil(deadline - time.monotonic()))
-            if remaining != last_remaining:
-                print(
-                    f"\r[RESET] Prepare evaluation episode {next_episode}/{args.num_episodes}: "
-                    f"{remaining}s remaining",
-                    end="",
-                    flush=True,
-                )
-                last_remaining = remaining
-            if remaining == 0:
+            command = control.poll()
+            if command == "start":
                 break
+            if command in ("success", "fail") and outcomes.relabel(command):
+                print(f"[EVAL] Episode {outcomes.counts()['done']} marked {command}", flush=True)
+                event("outcome", episode=outcomes.counts()["done"], outcome=command)
+            if deadline is not None:
+                remaining = max(0, math.ceil(deadline - time.monotonic()))
+                if remaining != last_remaining:
+                    print(
+                        f"\r[RESET] Prepare evaluation episode {label}: {remaining}s remaining",
+                        end="",
+                        flush=True,
+                    )
+                    last_remaining = remaining
+                if remaining == 0:
+                    break
 
             # Keep consuming observations during reset so the next episode starts
             # from a fresh remote frame rather than one cached before the reset.
             robot.get_observation()
-            sleep_t = min(control_interval, max(0.0, deadline - time.monotonic()))
+            sleep_t = (
+                control_interval
+                if deadline is None
+                else min(control_interval, max(0.0, deadline - time.monotonic()))
+            )
             if sleep_t > 0:
                 precise_sleep(sleep_t)
-        print(flush=True)
+        if deadline is not None:
+            print(flush=True)
 
     try:
         while args.continuous or recorded < args.num_episodes:
-            total = "" if args.continuous else f" of {args.num_episodes}"
-            log_say(f"Eval episode {recorded + 1}{total}")
+            log_say(f"Eval episode {recorded + 1}" + (f" of {total}" if total else ""))
             stop_inference(engine)
             engine.reset()
             engine.start()
@@ -395,9 +454,16 @@ def main():
             start = time.perf_counter()
             restart_pending = False
             episode_frames = 0
+            ended_by = "timeout"
+            event(
+                "episode_start", episode=recorded + 1, cap=None if math.isinf(episode_time) else episode_time
+            )
 
             while (time.perf_counter() - start) < episode_time:
                 loop_start = time.perf_counter()
+                if (command := control.poll()) in ("success", "fail", "end", "discard"):
+                    ended_by = command
+                    break
 
                 obs_raw = robot.get_observation()
                 previous_context = safety_guard.context
@@ -436,7 +502,8 @@ def main():
                         interpolator.add(action_tensor.cpu())
 
                 obs_raw, reason = safety_guard.check_observation(
-                    robot, obs_raw,
+                    robot,
+                    obs_raw,
                     refresh=time.perf_counter() - inference_started >= control_interval,
                 )
                 if reason or safety_guard.context != inference_context:
@@ -464,16 +531,34 @@ def main():
                     precise_sleep(sleep_t)
 
             engine.pause()
-            if dataset is None:
-                pass
-            elif episode_frames:
-                with defer_interrupt():
-                    dataset.save_episode()
-                print(f"[EVAL] Saved episode {recorded + 1} ({episode_frames} frames)", flush=True)
+            duration = time.perf_counter() - start
+            if ended_by == "discard":
+                if dataset is not None:
+                    dataset.clear_episode_buffer()
+                print(f"[EVAL] Discarded episode {recorded + 1}; it will be run again", flush=True)
+                event("discarded", episode=recorded + 1)
             else:
-                logging.warning("No evaluation frames collected; skipping empty episode.")
-            recorded += 1
-            if not args.continuous and recorded < args.num_episodes:
+                dataset_index = None
+                if dataset is None:
+                    pass
+                elif episode_frames:
+                    dataset_index = dataset.meta.total_episodes
+                    with defer_interrupt():
+                        dataset.save_episode()
+                    print(f"[EVAL] Saved episode {recorded + 1} ({episode_frames} frames)", flush=True)
+                else:
+                    logging.warning("No evaluation frames collected; skipping empty episode.")
+                outcome = ended_by if ended_by in ("success", "fail") else None
+                outcomes.add(outcome=outcome, frames=episode_frames, duration_s=duration,
+                             ended_by=ended_by, dataset_index=dataset_index)  # fmt: skip
+                if outcome:
+                    print(f"[EVAL] Episode {recorded + 1} marked {outcome}", flush=True)
+                recorded += 1
+                event("episode_end", episode=recorded, outcome=outcome, frames=episode_frames,
+                      duration_s=round(duration, 1), saved=dataset_index is not None)  # fmt: skip
+            more = args.continuous or recorded < args.num_episodes
+            # Continuous runs go back to back unless the operator wants to set up each episode.
+            if more and (args.wait_for_start or not args.continuous):
                 reset_environment(recorded + 1)
     finally:
         # A second Ctrl+C from the panel's stop escalation must not cut the hold/save below short.
@@ -497,6 +582,14 @@ def main():
                             robot.disconnect()
         finally:
             signal.signal(signal.SIGINT, previous_sigint)
+    counts = outcomes.counts()
+    if counts["success"] + counts["fail"]:
+        rate = 100 * counts["success"] / (counts["success"] + counts["fail"])
+        print(
+            f"[EVAL] {counts['success']} success / {counts['fail']} fail of {counts['done']} episodes "
+            f"({rate:.0f}% of judged)",
+            flush=True,
+        )
     log_say("Evaluation complete")
     if args.push_to_hub and dataset is not None:
         dataset.push_to_hub()

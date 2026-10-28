@@ -18,7 +18,7 @@ from pathlib import Path
 from config import DATA_DIR, REPO_ROOT, lerobot_home
 from fastapi import Depends, FastAPI, Header, HTTPException
 from gpu_checkpoints import scan_checkpoints
-from gpu_jobs import JobRequest, command
+from gpu_jobs import EpisodeCommand, JobRequest, command
 from procs import ConsoleProcess
 
 STATE_DIR = DATA_DIR / "gpu_jobs"
@@ -124,6 +124,16 @@ class Jobs:
             self.get(job_id)
             if proc := self.procs.get(job_id):
                 proc.stop()
+            return {"ok": True}
+
+    def send(self, job_id: str, text: str) -> dict:
+        """Pass an episode command to a running live evaluation (one line on its terminal)."""
+        with self.lock:
+            record = self.get(job_id)
+            proc = self.procs.get(job_id)
+            if record["kind"] != "robot_eval" or proc is None or not proc.running or proc.stopping:
+                raise HTTPException(409, "This job is not a running live evaluation.")
+            proc.write(text + "\n")
             return {"ok": True}
 
     def list(self) -> list[dict]:
@@ -253,3 +263,8 @@ def detail(job_id: str) -> dict:
 @app.post("/jobs/{job_id}/stop")
 def stop(job_id: str) -> dict:
     return manager().stop(job_id)
+
+
+@app.post("/jobs/{job_id}/command")
+def episode_command(job_id: str, req: EpisodeCommand) -> dict:
+    return manager().send(job_id, req.command)
