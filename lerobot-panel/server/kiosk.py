@@ -67,13 +67,33 @@ class KioskConfig(BaseModel):
     model: str = Field(default="claude-opus-5-5", max_length=80)
     effort: Literal["low", "medium", "high"] = "low"
     tts_model: str = Field(default="eleven_v4", max_length=80)
-    voice_id: str = Field(default="21m00Tcm4TlvDq8ikWAM", max_length=80)
+    voice_id: str = Field(default="EXAVITQu4vr4xnSDxMaL", max_length=80)
     extra_instructions: str = Field(default="", max_length=4000)
     # Safety: the robot only moves while staff have armed it here (the iPad's debug drawer).
     armed: bool = False
     # Rehearse the conversation without the robot: picks pretend to run for a few seconds.
     simulate_picks: bool = False
     idle_reset_s: int = Field(default=180, ge=0, le=3600)
+    # Listening (applied on the iPad). Speech quieter than this (dBFS) can't interrupt the robot or start a
+    # turn: the customer at the iPad is much louder than people chatting nearby. -80 turns the gate off.
+    mic_gate_db: int = Field(default=-45, ge=-80, le=-10)
+    # How much a customer must say (CJK characters; a Latin word counts 2) to interrupt the robot mid-sentence.
+    # Short stop words (停, 等一下, stop, ...) always interrupt.
+    barge_in_chars: int = Field(default=6, ge=1, le=30)
+    # A fast model decides whether each heard utterance was said to the robot (vs. people talking among
+    # themselves). "" turns the check off; any failure or timeout counts as "yes".
+    addressee_model: str = Field(default="claude-haiku-5-5", max_length=80)
+    # The iPad's front camera: only listen while a face at least this wide (fraction of the picture) is in front,
+    # and tell the addressee check whether that person faced the robot and moved their lips.
+    camera_listen: bool = True
+    face_min_size: float = Field(default=0.06, ge=0.01, le=0.6)
+    # The face model misses faces smaller than ~8% of what it looks at, so it looks at the middle of the
+    # picture enlarged by this much (customers stand in front of the robot).
+    camera_zoom: float = Field(default=1.5, ge=1, le=3)
+    camera_crop_y: float = Field(default=0.3, ge=0, le=1)  # where the zoomed part sits: 0 top, 1 bottom
+    greet_on_arrival: bool = True
+    # Start over for the next customer once nobody has been at the counter this long (0 = off).
+    leave_reset_s: int = Field(default=20, ge=0, le=600)
     items: list[Item] = Field(
         default_factory=lambda: [
             Item(
@@ -239,6 +259,8 @@ stop, or anything sounds unsafe, call stop_robot immediately.
 in one short sentence (for example, hand over the cake when a pick finishes).
 - If a tool reports the robot is not armed or another problem, explain briefly and offer to call staff \
 (notify_owner).
+- When the customer says goodbye or walks off, or asks to start over, say a short goodbye and call \
+clear_context so the next customer starts fresh.
 - Payment, allergies beyond the descriptions and anything you cannot do: say a staff member will help.
 {cfg.extra_instructions}""".strip()
 
@@ -309,6 +331,12 @@ TOOLS = [
         "a customer needs help, or the robot needs attention.",
         {"message": {"type": "string"}, "urgent": {"type": "boolean"}},
         ["message"],
+    ),
+    _tool(
+        "clear_context",
+        "Forget this conversation once you have finished replying, so the next customer starts "
+        "fresh. Use it when the customer says goodbye or leaves, or asks to start over. Say your goodbye in "
+        "the same reply; it is spoken before the memory is cleared.",
     ),
 ]
 
@@ -511,12 +539,73 @@ class Speaker:
             task.cancel()
 
 
+# ---------- is it for me? ----------
+
+ADDRESSEE_TIMEOUT_S = 2.0
+_STOP_WORDS = re.compile(r"停|等一下|等等|暫停|不要了|stop|wait|hold on", re.I)
+
+
+class VisionSummary(BaseModel):
+    """What the iPad's front camera saw while one utterance was spoken (see app/kiosk/vision.ts)."""
+
+    present: float = Field(ge=0, le=1)  # share of frames with someone at the counter
+    facing: float = Field(ge=0, le=1)  # of those, share facing the robot
+    mouth: float = Field(default=0, ge=0, le=1)  # jawOpen std dev
+    lips: bool = False  # their lips moved
+
+
+def camera_line(v: VisionSummary | None) -> str:
+    if v is None:
+        return ""
+    facing = "facing the robot" if v.facing >= 0.5 else "mostly turned away from the robot"
+    if v.lips:
+        return f"\nCamera: a person stood at the counter, {facing}, and their lips moved while this was said."
+    return (
+        f"\nCamera: a person stood at the counter, {facing}, but their lips did not visibly move while this was "
+        "said, so it may have come from someone else nearby (or they wear a mask)."
+    )
+
+
+def trusted(v: VisionSummary | None) -> bool:
+    """The person in front, facing the robot, was visibly talking: no need to ask the addressee model."""
+    return v is not None and v.lips and v.facing >= 0.5
+
+
+def addressee_prompt(
+    cfg: KioskConfig, recent: list[str], text: str, robot_talking: bool, vision: VisionSummary | None = None
+) -> str:
+    history = "\n".join(recent[-6:]) or "(no conversation yet)"
+    return f"""A robot works the cake counter at {cfg.shop_name}. A microphone on it hears everything nearby, \
+including people who are not talking to it. Decide whether the latest utterance was said TO THE ROBOT.
+
+Yes: a customer greeting it, asking about or choosing cakes, answering its question, reacting to it, saying \
+thanks or goodbye, or telling it to stop or wait. Short replies (好, 對, 不要, OK, 嗯) right after the robot \
+asked something are yes.
+No: people talking to each other (about the robot, the cakes, or anything else), phone calls, staff talking \
+among themselves, announcements, and fragments that mean nothing to the robot.
+When unsure, answer yes.
+
+Recent conversation:
+{history}
+
+The robot {"was speaking" if robot_talking else "was silent"} when this was heard.{camera_line(vision)}
+Latest utterance (speech recognition, may contain errors): {text}
+
+Answer with one word: yes or no."""
+
+
 # ---------- the conversation ----------
 
 
 class Session:
     def __init__(self) -> None:
         self.messages: list[dict] = []
+        self.clear_after_turn = False
+        self.gate: asyncio.Future | None = None
+        self._warmed = False
+        self.present = False
+        self.greeted_at = 0.0
+        self.leave_task: asyncio.Task | None = None
         self.clients: set[WebSocket] = set()
         self.log: deque[dict] = deque(maxlen=400)
         self.turn_task: asyncio.Task | None = None
@@ -576,18 +665,152 @@ class Session:
 
     # -- turns
 
-    async def user_said(self, text: str, metrics: dict | None = None) -> None:
+    async def user_said(
+        self,
+        text: str,
+        metrics: dict | None = None,
+        mic: bool = False,
+        robot_talking: bool = False,
+        vision: VisionSummary | None = None,
+    ) -> None:
+        """A customer utterance. From the mic, it only counts once the addressee check says it was for us:
+        while the robot talks we wait for the check before interrupting; when it is quiet the reply starts
+        right away but holds its speech and tools until the check passes (the check is usually done first)."""
         text = text.strip()
         if not text:
             return
         cfg = store.load()
         if cfg.idle_reset_s and self.messages and time.time() - self.last_activity > cfg.idle_reset_s:
             await self.reset("new customer (idle)")
+        check = None
+        if mic and cfg.addressee_model and not _STOP_WORDS.search(text) and not trusted(vision):
+            talking = robot_talking or bool(self.turn_task and not self.turn_task.done())
+            check = asyncio.create_task(self.addressed(cfg, text, talking, vision))
+            if talking:
+                if not await check:
+                    return await self._ignore(text)
+                check = None
         self.last_activity = time.time()
         await self.interrupt("customer spoke")
+        before = len(self.messages)
         self.messages.append({"role": "user", "content": text})
-        await self.emit({"type": "user", "text": text, "metrics": metrics or {}})
-        self._start_turn()
+        if check is None:
+            await self.emit(
+                {
+                    "type": "user",
+                    "text": text,
+                    "metrics": metrics or {},
+                    "vision": vision.model_dump() if vision else None,
+                }
+            )
+            self._start_turn()
+            return
+        gate = asyncio.get_running_loop().create_future()
+        self._start_turn(gate)
+        task = self.turn_task
+        ok = await check
+        if ok:
+            await self.emit(
+                {
+                    "type": "user",
+                    "text": text,
+                    "metrics": metrics or {},
+                    "vision": vision.model_dump() if vision else None,
+                }
+            )
+            gate.set_result(True)
+            return
+        # Not for us: drop the reply before it said or did anything (unless newer speech already took over).
+        if self.turn_task is task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            del self.messages[before:]
+        await self._ignore(text)
+
+    async def addressed(
+        self, cfg: KioskConfig, text: str, robot_talking: bool, vision: VisionSummary | None = None
+    ) -> bool:
+        recent = []
+        for m in self.messages:
+            content = m["content"]
+            if isinstance(content, str):
+                said = content
+            else:
+                said = " ".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
+            if said.strip():
+                who = "Customer" if m["role"] == "user" and not said.startswith("[") else "Robot"
+                recent.append(f"{who}: {clean_speech(_FACE_RE.sub('', said))[:200]}")
+        started = time.time()
+        try:
+            response = await asyncio.wait_for(
+                self.anthropic().messages.create(
+                    model=cfg.addressee_model,
+                    max_tokens=8,
+                    thinking={"type": "disabled"},  # plain yes/no answers in ~0.7 s
+                    output_config={"effort": "low"},
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": addressee_prompt(cfg, recent, text, robot_talking, vision),
+                        }
+                    ],
+                ),
+                ADDRESSEE_TIMEOUT_S,
+            )
+            answer = "".join(b.text for b in response.content if b.type == "text").strip().lower()
+            ok = not answer.startswith("no")
+        except Exception as e:  # noqa: BLE001 — fail open: better to answer side-talk than ignore a customer
+            await self.emit({"type": "error", "where": "addressee", "message": f"{type(e).__name__}: {e}"})
+            return True
+        await self.emit(
+            {"type": "addressee", "text": text, "to_robot": ok, "duration_s": round(time.time() - started, 2)}
+        )
+        return ok
+
+    async def warm_up(self) -> None:
+        """Open the connection the addressee check uses, so the first customer doesn't wait for it."""
+        cfg = store.load()
+        if self._warmed or not cfg.addressee_model or not os.environ.get("ANTHROPIC_API_KEY"):
+            return
+        self._warmed = True
+        with contextlib.suppress(Exception):
+            await self.anthropic().messages.create(
+                model=cfg.addressee_model,
+                max_tokens=1,
+                thinking={"type": "disabled"},
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    async def presence(self, present: bool) -> None:
+        """The iPad's camera saw someone walk up to the counter, or nobody has been there for a few seconds."""
+        if present == self.present:
+            return
+        self.present = present
+        await self.emit({"type": "presence", "present": present})
+        if self.leave_task:
+            self.leave_task.cancel()
+            self.leave_task = None
+        cfg = store.load()
+        if present:
+            busy = self.turn_task and not self.turn_task.done()
+            if cfg.greet_on_arrival and not self.messages and not busy and time.time() - self.greeted_at > 30:
+                self.greeted_at = time.time()
+                await self.robot_event(
+                    "Someone just walked up to the counter. Greet them in one short sentence and invite them "
+                    "to choose a cake."
+                )
+        elif cfg.leave_reset_s:
+            self.leave_task = asyncio.create_task(self._reset_after_leaving(cfg.leave_reset_s))
+
+    async def _reset_after_leaving(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        busy = (self.turn_task and not self.turn_task.done()) or (self.pick and self.pick.active)
+        if not self.present and self.messages and not busy:  # mid-pick they are coming back for the cake
+            await self.reset("customer left")
+
+    async def _ignore(self, text: str) -> None:
+        await self.emit({"type": "ignored", "message": f"not said to me: {text}"})
 
     async def robot_event(self, text: str) -> None:
         """Our own systems speaking (e.g. a pick finished): wait for the current reply, then react."""
@@ -598,8 +821,14 @@ class Session:
         await self.emit({"type": "robot_event", "text": text})
         self._start_turn()
 
-    def _start_turn(self) -> None:
+    def _start_turn(self, gate: asyncio.Future | None = None) -> None:
+        self.gate = gate
         self.turn_task = asyncio.create_task(self._turn(uuid.uuid4().hex[:8]))
+
+    async def _wait_gate(self) -> None:
+        """Hold speech and tools until the addressee check has passed (see user_said)."""
+        if self.gate is not None:
+            await self.gate
 
     async def interrupt(self, reason: str) -> None:
         task = self.turn_task
@@ -609,10 +838,11 @@ class Session:
                 await task
             await self.emit({"type": "interrupted", "reason": reason})
 
-    async def reset(self, reason: str = "reset") -> None:
+    async def reset(self, reason: str = "reset", keep_audio: bool = False) -> None:
         await self.interrupt(reason)
         self.messages = []
-        await self.emit({"type": "reset", "reason": reason})
+        self.clear_after_turn = False
+        await self.emit({"type": "reset", "reason": reason, "keep_audio": keep_audio})
 
     async def _turn(self, turn: str) -> None:
         speaker = Speaker(self, turn)
@@ -621,6 +851,7 @@ class Session:
         pending: asyncio.Future | None = None
         t0 = time.time()
         timing: dict = {}
+        self.clear_after_turn = False
         try:
             for _step in range(MAX_TOOL_STEPS):
                 await self.set_state("thinking")
@@ -633,6 +864,7 @@ class Session:
                 uses = [b for b in message.content if b.type == "tool_use"]
                 if not uses:
                     break
+                await self._wait_gate()
                 pending = asyncio.ensure_future(self._run_tools(uses))
                 results = await asyncio.shield(pending)
                 pending = None
@@ -646,6 +878,10 @@ class Session:
                 "first_audio_s": round(speaker.first_audio_at - t0, 2) if speaker.first_audio_at else None,
                 "total_s": round(time.time() - t0, 2),
             }})  # fmt: skip
+            if self.clear_after_turn:
+                # Claude asked to forget the conversation; its goodbye has been sent, let it finish playing.
+                self.turn_task = None
+                await self.reset("conversation cleared by the assistant", keep_audio=True)
         except asyncio.CancelledError:
             speaker.cancel()
             # Keep the history valid: every tool_use needs its result, even when interrupted.
@@ -717,6 +953,8 @@ class Session:
         return message
 
     async def _speak(self, turn: str, speaker: Speaker, sentences: list[str], faces: list[str]) -> None:
+        if sentences or faces:
+            await self._wait_gate()
         for face in faces:
             await self.emit({"type": "face", "face": face}, keep=False)
         for sentence in sentences:
@@ -885,6 +1123,14 @@ class Session:
             return "Nothing is running; the arm is idle."
         await self.stop_pick()
         return f"Stop sent for the {pick.item_name} pick."
+
+    async def tool_clear_context(self) -> str:
+        if self.pick and self.pick.active:
+            raise ToolError(
+                f"The {self.pick.item_name} pick is still running; keep the conversation until it finishes."
+            )
+        self.clear_after_turn = True
+        return "The conversation will be forgotten after this reply. Say goodbye now; no more tool calls."
 
     async def tool_notify_owner(self, message: str, urgent: bool = False) -> str:
         await self.notify(message, urgent, source="robot")
@@ -1226,12 +1472,23 @@ async def kiosk_ws(ws: WebSocket) -> None:
     await ws.accept()
     session.clients.add(ws)
     await ws.send_json(session.snapshot())
+    asyncio.create_task(session.warm_up())
     try:
         while True:
             msg = await ws.receive_json()
             kind = msg.get("type")
             if kind == "user_text":
-                asyncio.create_task(session.user_said(str(msg.get("text", ""))[:2000], msg.get("metrics")))
+                asyncio.create_task(
+                    session.user_said(
+                        str(msg.get("text", ""))[:2000],
+                        msg.get("metrics"),
+                        mic=bool(msg.get("mic")),
+                        robot_talking=bool(msg.get("robot_talking")),
+                        vision=_vision(msg.get("vision")),
+                    )
+                )
+            elif kind == "presence":
+                asyncio.create_task(session.presence(bool(msg.get("present"))))
             elif kind == "interrupt":
                 asyncio.create_task(session.interrupt("barge-in"))
             elif kind == "reset":
@@ -1249,6 +1506,13 @@ async def kiosk_ws(ws: WebSocket) -> None:
         pass
     finally:
         session.clients.discard(ws)
+
+
+def _vision(data: Any) -> VisionSummary | None:
+    try:
+        return VisionSummary.model_validate(data) if data else None
+    except ValueError:
+        return None
 
 
 async def _safe(coro) -> None:

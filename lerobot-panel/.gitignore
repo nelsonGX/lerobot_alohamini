@@ -43,3 +43,6 @@ next-env.d.ts
 # panel runtime state (settings, session history)
 /.data/
 __pycache__/
+
+# face model files, fetched by scripts/fetch-vision.mjs
+/public/mediapipe/

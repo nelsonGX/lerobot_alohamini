@@ -176,8 +176,9 @@ panel: Claude (tools) ─► sentences ─► ElevenLabs (eleven_v4) ─► mp3 
 Claude's tools (`server/kiosk.py`): `look_at_table` (chest + overhead camera stills, through the same relay
 as the camera previews), `check_inventory` (simulated stock: on display / in the back / sold), `pick_item`
 (a one-episode live evaluation of that item's checkpoint on the GPU server, i.e. the same job as **Train &
-Eval → Live robot**, without recording), `check_pick_status`, `stop_robot`, and `notify_owner` (notes on the
-owner tab). When a pick ends, the panel marks the item sold, notifies the owner (restock or sold out) and
+Eval → Live robot**, without recording), `check_pick_status`, `stop_robot`, `notify_owner` (notes on the
+owner tab), and `clear_context` (when a customer says goodbye or asks to start over, Claude says goodbye and
+then forgets the conversation; **Reset** in the debug drawer and the idle timeout do the same). When a pick ends, the panel marks the item sold, notifies the owner (restock or sold out) and
 tells Claude, which then speaks without waiting to be asked.
 
 Setup:
@@ -213,8 +214,28 @@ Setup:
 **Simulate picks** (setup) rehearses the whole conversation without the robot or GPU. Type into the debug
 drawer to talk without a microphone. `/kiosk?monitor=1` on a laptop follows the same conversation (log, tool calls
 with the camera images Claude saw, latency per turn, owner notes) without its own mic or sound. Customers
-can interrupt the robot by talking. If it hears its own voice through the speaker, turn on *Mute mic while
-talking*. The conversation resets after `idle_reset_s` of silence (the next customer). Settings and inventory
+can interrupt the robot by talking: after about 6 characters (*Characters needed to interrupt*) the robot
+turns its voice down, and when the customer finishes, a quick Claude Haiku check (*Addressee check model*,
+about 0.7 s) decides whether it was said to the robot. If yes, the robot stops and answers; if it was people
+talking to each other, the robot carries on at full volume and the log shows "not for me". When the robot is
+quiet, the reply starts at once and waits for the check only before speaking or using a tool, so it adds no
+delay. 停 / 等一下 / stop interrupt at once without a check, and if the check fails it counts as "yes". At a busy booth, set the *loudness gate* (setup): speak at the iPad and watch the meter,
+then watch it while the room talks, and put the gate between the two. Speech quieter than the gate can't
+interrupt or start a turn (ignored speech shows in the log). The gate turns off the mic's automatic gain, so
+reload the page after switching it on or off. If the robot hears its own voice through the speaker, turn on
+*Mute mic while talking*.
+
+**Front camera.** The iPad's front camera (MediaPipe face landmarks, on the iPad only; no frames leave it) adds
+three signals: someone is at the counter (speech while nobody is there is ignored, except 停 / 等一下 / stop),
+they face the robot, and their lips move while the words come in. A facing customer whose lips moved skips the
+Haiku check (faster replies); otherwise the camera's view is passed to the check as a hint ("lips did not move:
+probably someone else nearby"). The robot also greets people who walk up, and starts fresh for the next
+customer once nobody has been at the counter for `leave_reset_s` (not during a pick). Set it up in setup with
+someone standing where customers stand: the camera view boxes faces green when they count as "at the
+counter". The face model misses faces under ~8% of what it looks at, so raise *Camera zoom* until customers
+at the counter are boxed, and move the dashed frame (*Zoomed part*) to where their faces are. Masks hide the
+lips; the check then decides from the words. If the camera fails or is denied, listening works as before.
+The model files are put in `public/mediapipe/` by `npm run build` (the face model is downloaded once). The conversation resets after `idle_reset_s` of silence (the next customer). Settings and inventory
 live in `.data/kiosk.json`.
 
 ## Layout

@@ -6,8 +6,8 @@ objects:
   name: cake box
   color: '#e53935'
 - id: object_2
-  name: black umbrella
-  color: '#000000'
+  name: tiramisu
+  color: '#291f1f'
 slots:
 - left
 - right
@@ -17,9 +17,9 @@ tasks:
   object: object_1
   target: 100
 - id: pick_object_2
-  text: Pick up the black umbrella and put it in the box
+  text: Pick up the tiramisu and put it in the box
   object: object_2
-  target: 1
+  target: 100
 quality:
   min_episode_s: 3.0
   min_fps_ratio: 0.9

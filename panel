@@ -13,7 +13,8 @@ PORT="${PANEL_PORT:-8000}"
 
 if [[ "${1:-}" == "--rebuild" || ! -f lerobot-panel/out/index.html ]]; then
   echo "Building the panel UI..."
-  (cd lerobot-panel && { [[ -d node_modules ]] || npm ci; } && npm run build)
+  # Reinstall when package-lock.json changed since the last install (new dependencies).
+  (cd lerobot-panel && if [[ ! -d node_modules || package-lock.json -nt node_modules/.package-lock.json ]]; then npm ci; fi && npm run build)
 fi
 
 echo "Panel: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT  (Ctrl+C to stop)"

@@ -66,10 +66,19 @@ class FakeStream:
 class FakeClaude:
     """Replays scripted responses; records each request's messages."""
 
-    def __init__(self, script):
+    def __init__(self, script, verdicts=()):
         self.script = list(script)
         self.requests = []
+        self.verdicts = list(verdicts)  # addressee check answers ("yes"/"no", or an exception)
         self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self.stream))
+        self.messages = SimpleNamespace(create=self.create)
+
+    async def create(self, **kwargs):
+        await asyncio.sleep(0.05)  # slower than the reply's first tokens: speech must wait for it
+        verdict = self.verdicts.pop(0) if self.verdicts else "yes"
+        if isinstance(verdict, Exception):
+            raise verdict
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=verdict)])
 
     def stream(self, **kwargs):
         self.requests.append({**kwargs, "messages": list(kwargs["messages"])})
@@ -179,6 +188,175 @@ def test_turn_with_tool_then_speech(env):
     second = session._client.requests[1]
     assert second["output_config"] == {"effort": "low"} and second["fallbacks"] == "default"
     assert client.of("turn_done")
+
+
+def test_clear_context_forgets_after_the_goodbye(env):
+    session, client = env
+    session._client = FakeClaude([
+        FakeStream([], message([tool_block("clear_context", {})], "tool_use")),
+        FakeStream(text_events("{happy}謝謝光臨，掰掰！"), message([text_block("謝謝光臨，掰掰！")], "end_turn")),
+        FakeStream(text_events("歡迎光臨！"), message([text_block("歡迎光臨！")], "end_turn")),
+    ])  # fmt: skip
+
+    async def run():
+        await session.user_said("謝謝，掰掰")
+        await settle(session)
+        assert session.messages == []
+        await session.user_said("你好")
+        await settle(session)
+
+    asyncio.run(run())
+    assert [e["text"] for e in client.of("speech")] == ["謝謝光臨，掰掰！", "歡迎光臨！"]
+    reset = client.of("reset")[0]
+    assert reset["keep_audio"] and not client.of("interrupted")  # the goodbye keeps playing
+    assert session._client.requests[2]["messages"] == [{"role": "user", "content": "你好"}]
+
+
+def test_clear_context_waits_for_a_running_pick(env):
+    session, _ = env
+    session.pick = kiosk.Pick(
+        job_id="j", item_id="tiramisu", item_name="提拉米蘇", started_at=0, time_limit_s=40
+    )
+    with pytest.raises(kiosk.ToolError):
+        asyncio.run(session.tool_clear_context())
+    assert not session.clear_after_turn
+
+
+def test_side_talk_is_dropped_before_it_says_or_does_anything(env):
+    session, client = env
+    session._client = FakeClaude(
+        [FakeStream([], message([tool_block("check_inventory", {})], "tool_use"))], verdicts=["No"]
+    )
+
+    async def run():
+        await session.user_said("欸你今天晚上要去吃什麼", {}, mic=True)
+        await settle(session)
+
+    asyncio.run(run())
+    assert session.messages == []
+    assert not client.of("tool") and not client.of("speech") and not client.of("user")
+    assert client.of("ignored") and client.of("addressee")[0]["to_robot"] is False
+
+
+def test_customer_speech_passes_the_check_and_is_answered(env):
+    session, client = env
+    session._client = FakeClaude(
+        [FakeStream(text_events("好的。"), message([text_block("好的。")], "end_turn"))], verdicts=["yes"]
+    )
+
+    async def run():
+        await session.user_said("提拉米蘇好了", {}, mic=True)
+        await settle(session)
+
+    asyncio.run(run())
+    assert [e["text"] for e in client.of("speech")] == ["好的。"]
+    assert [e["type"] for e in client.events if e["type"] in ("addressee", "user", "speech")] == [
+        "addressee",
+        "user",
+        "speech",
+    ]
+
+
+def test_side_talk_while_the_robot_talks_does_not_interrupt_it(env):
+    session, client = env
+    session._client = FakeClaude(
+        [FakeStream(text_events("我們有草莓蛋糕和提拉米蘇，兩個都很好吃。"), message([text_block("x")], "end_turn"), delay=0.01)],
+        verdicts=["no"],
+    )  # fmt: skip
+
+    async def run():
+        await session.user_said("有什麼？")
+        await asyncio.sleep(0.05)
+        await session.user_said("那個機器人好可愛", {}, mic=True, robot_talking=True)
+        await settle(session)
+
+    asyncio.run(run())
+    assert not client.of("interrupted") and client.of("ignored")
+    assert [m["role"] for m in session.messages] == ["user", "assistant"]
+
+
+def test_stop_words_and_check_failures_never_block_a_customer(env):
+    session, client = env
+    session._client = FakeClaude(
+        [
+            FakeStream(text_events("好。"), message([text_block("好。")], "end_turn")),
+            FakeStream(text_events("好。"), message([text_block("好。")], "end_turn")),
+        ],
+        verdicts=[RuntimeError("overloaded")],
+    )
+
+    async def run():
+        await session.user_said("等一下", {}, mic=True)  # no check at all
+        await settle(session)
+        await session.user_said("我要草莓", {}, mic=True)  # check fails: answered anyway
+        await settle(session)
+
+    asyncio.run(run())
+    assert len(client.of("speech")) == 2 and len(client.of("user")) == 2
+    assert client.of("error")[0]["where"] == "addressee"
+
+
+def test_visibly_talking_customer_skips_the_check_and_camera_hints_reach_it(env):
+    session, client = env
+    reply = lambda: FakeStream(text_events("好。"), message([text_block("好。")], "end_turn"))  # noqa: E731
+    session._client = FakeClaude([reply(), reply()], verdicts=["yes"])
+    prompts = []
+    create = session._client.create
+
+    async def spy(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"])
+        return await create(**kwargs)
+
+    session._client.messages.create = spy
+    talking = kiosk.VisionSummary(present=1, facing=0.9, mouth=0.08, lips=True)
+    still = kiosk.VisionSummary(present=1, facing=0.2, mouth=0.0, lips=False)
+
+    async def run():
+        await session.user_said("我要草莓", {}, mic=True, vision=talking)
+        await settle(session)
+        await session.user_said("好啊", {}, mic=True, vision=still)
+        await settle(session)
+
+    asyncio.run(run())
+    assert len(prompts) == 1  # only the second utterance was checked
+    assert "lips did not visibly move" in prompts[0] and "turned away" in prompts[0]
+    assert client.of("user")[0]["vision"]["lips"] is True
+
+
+def test_greets_on_arrival_and_starts_fresh_after_they_leave(env):
+    session, client = env
+    kiosk.store.update(lambda c: setattr(c, "leave_reset_s", 1))
+    session._client = FakeClaude(
+        [FakeStream(text_events("{happy}歡迎光臨！"), message([text_block("歡迎光臨！")], "end_turn"))]
+    )
+
+    async def run():
+        await session.presence(True)
+        await settle(session)
+        await session.presence(True)  # no repeat
+        await session.presence(False)
+        await asyncio.sleep(1.1)
+
+    asyncio.run(run())
+    assert [e["text"] for e in client.of("speech")] == ["歡迎光臨！"]
+    assert "walked up" in client.of("robot_event")[0]["text"]
+    assert session.messages == [] and client.of("reset")[0]["reason"] == "customer left"
+
+
+def test_coming_back_cancels_the_reset(env):
+    session, client = env
+    kiosk.store.update(lambda c: setattr(c, "leave_reset_s", 1) or setattr(c, "greet_on_arrival", False))
+    session.messages = [{"role": "user", "content": "你好"}]
+
+    async def run():
+        await session.presence(True)
+        await session.presence(False)
+        await asyncio.sleep(0.3)
+        await session.presence(True)
+        await asyncio.sleep(1.0)
+
+    asyncio.run(run())
+    assert session.messages and not client.of("reset")
 
 
 def test_interrupt_keeps_history_valid(env):
