@@ -17,6 +17,7 @@ export function Nav() {
   const s = data?.session;
   const active = s?.active;
   const meta = s ? PHASE_META[s.phase] : null;
+  if (path.startsWith("/kiosk")) return null; // the iPad face is full screen
 
   const tab = (href: string, label: ReactNode) => {
     const on = href === "/" ? path === "/" : path.startsWith(href);

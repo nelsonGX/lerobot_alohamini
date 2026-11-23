@@ -34,6 +34,7 @@ from upload import UploadJob  # noqa: E402
 import gpu_remote  # noqa: E402
 from gpu_jobs import JobRequest  # noqa: E402
 from base_control import BaseCommand, BaseConnect  # noqa: E402
+import kiosk  # noqa: E402
 
 recorder = Recorder()
 uploader = UploadJob()
@@ -52,6 +53,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="LeRobot Panel", lifespan=lifespan)
 app.include_router(gpu_remote.router)
+app.include_router(kiosk.router)
 
 
 @app.post("/api/gpu/jobs")
@@ -332,6 +334,9 @@ def host_telemetry() -> dict:
 
 
 CAMERA_STREAM_PORT = 5557  # the host's --camera_stream port
+# The shop-assistant chat (/kiosk) looks through the same camera relay and starts picks through gpu_start.
+kiosk.configure(camera_feed=camera_feed, camera_port=CAMERA_STREAM_PORT, start_job=lambda req: gpu_start(req),
+                gpu_call=gpu_remote.call)
 
 
 @app.get("/api/cameras")

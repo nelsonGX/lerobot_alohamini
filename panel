@@ -3,8 +3,12 @@
 # Usage: ./panel [--rebuild]      then open http://<this-machine>:8000
 #   PANEL_PORT=8080 ./panel       use another port
 #   JETSON_IP=...                 initial Jetson IP (can be changed in the panel's settings)
+#   ANTHROPIC_API_KEY, ASSEMBLYAI_API_KEY, ELEVENLABS_API_KEY   keys for the /kiosk voice assistant,
+#                                 read from .env in the repo root (copy .env.example)
 set -euo pipefail
 cd "$(dirname "$0")"
+# Keys for the /kiosk voice assistant (and any other settings) can live in .env (git-ignored).
+if [[ -f .env ]]; then set -a; source .env; set +a; fi
 PORT="${PANEL_PORT:-8000}"
 
 if [[ "${1:-}" == "--rebuild" || ! -f lerobot-panel/out/index.html ]]; then
@@ -14,4 +18,5 @@ fi
 
 echo "Panel: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT  (Ctrl+C to stop)"
 exec uv run --with 'fastapi>=0.115' --with 'uvicorn[standard]>=0.30' --with 'pyzmq>=26.2.1' \
+  --with 'anthropic>=2.12' \
   uvicorn --app-dir lerobot-panel/server main:app --host 0.0.0.0 --port "$PORT"

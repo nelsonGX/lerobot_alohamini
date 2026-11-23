@@ -1,0 +1,494 @@
+"use client";
+
+/* Shop-assistant face for the iPad on the robot (server: server/kiosk.py).
+ * Mic -> AssemblyAI streaming (direct, temporary token) -> final transcript -> /api/kiosk/ws -> Claude + tools
+ * -> sentences with ElevenLabs mp3 -> played here in order. ?debug=1 opens the drawer, ?monitor=1 watches
+ * from another screen without mic or sound. */
+
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+
+type Item = { id: string; name: string; description: string; price: string; position: string; on_table: boolean; back_stock: number; sold: number; checkpoint: string; task: string; episode_time_s: number };
+type Config = { shop_name: string; language: string; model: string; effort: "low" | "medium" | "high"; tts_model: string; voice_id: string; extra_instructions: string; armed: boolean; simulate_picks: boolean; idle_reset_s: number; items: Item[] };
+type Pick = { job_id: string; item_id: string; item_name: string; state: string; detail: string; active: boolean; elapsed_s: number; time_limit_s: number; simulated: boolean; episode_started_at: number | null };
+type Note = { at: number; message: string; urgent: boolean; source: string };
+type LogEvent = { type: string; at: number; [k: string]: unknown };
+type Keys = { anthropic: boolean; assemblyai: boolean; elevenlabs: boolean };
+
+const FACE: Record<string, [string, string]> = {
+  // [resting, mouth open] — the second one alternates while talking.
+  happy: [":)", ":D"], excited: [":D", ":O"], thinking: [":/", ":o"], sad: [":(", ":C"],
+  surprised: [":O", ":o"], love: [":3", ":D"], neutral: [":|", ":o"],
+};
+const BARGE_IN_CHARS = 3; // a partial transcript this long while the robot talks interrupts it
+
+function speechLength(text: string) {
+  // Chinese has no spaces: count CJK characters, plus Latin words.
+  const cjk = (text.match(/[㐀-鿿]/g) ?? []).length;
+  const words = text.replace(/[㐀-鿿]/g, " ").trim().split(/\s+/).filter(Boolean).length;
+  return cjk + words * 2;
+}
+
+export default function KioskPage() {
+  const search = useSyncExternalStore(() => () => {}, () => location.search, () => "");
+  const params = new URLSearchParams(search);
+  const monitor = params.get("monitor") === "1";
+  const [startedTap, setStarted] = useState(false);
+  const started = startedTap || monitor;
+  const [debugToggle, setDebug] = useState<boolean | null>(null);
+  const debug = debugToggle ?? params.get("debug") === "1";
+  const [wsUp, setWsUp] = useState(false);
+  const [stt, setStt] = useState("off");
+  const [partial, setPartial] = useState("");
+  const [serverState, setServerState] = useState("idle");
+  const [emotion, setEmotion] = useState("happy");
+  const [speaking, setSpeaking] = useState(false);
+  const [caption, setCaption] = useState("");
+  const [heard, setHeard] = useState("");
+  const [log, setLog] = useState<LogEvent[]>([]);
+  const [pick, setPick] = useState<Pick | null>(null);
+  const [config, setConfig] = useState<Config | null>(null);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [keys, setKeys] = useState<Keys | null>(null);
+  const [halfDuplex, setHalfDuplex] = useState(false);
+  const [blink, setBlink] = useState(false);
+  const [mouth, setMouth] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const ws = useRef<WebSocket | null>(null);
+  const ctx = useRef<AudioContext | null>(null);
+  const sources = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const playAt = useRef(0);
+  const chain = useRef<Promise<void>>(Promise.resolve());
+  const ignored = useRef<Set<string>>(new Set());
+  const seenTurns = useRef<Set<string>>(new Set());
+  const speakingRef = useRef(false);
+  const worklet = useRef<AudioWorkletNode | null>(null);
+  const sttEndAt = useRef<number | null>(null);
+  const halfDuplexRef = useRef(false);
+  const monitorRef = useRef(false);
+  const cfgLang = useRef("zh-TW");
+  useEffect(() => { halfDuplexRef.current = halfDuplex; }, [halfDuplex]);
+  useEffect(() => { cfgLang.current = config?.language ?? "zh-TW"; }, [config?.language]);
+  useEffect(() => { monitorRef.current = monitor; }, [monitor]);
+
+  const send = useCallback((msg: object) => {
+    if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify(msg));
+  }, []);
+  const addLog = useCallback((ev: LogEvent) => setLog((l) => [...l.slice(-300), ev]), []);
+
+  // ---- playback
+
+  const stopAudio = useCallback(() => {
+    for (const s of sources.current) { try { s.stop(); } catch { /* already stopped */ } }
+    sources.current.clear();
+    if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
+    for (const t of seenTurns.current) ignored.current.add(t);
+    chain.current = Promise.resolve();
+    playAt.current = 0;
+  }, []);
+
+  const enqueueSpeech = useCallback((turn: string, text: string, audio: string | null, lang: string) => {
+    if (monitorRef.current || ignored.current.has(turn)) return;
+    seenTurns.current.add(turn);
+    chain.current = chain.current.then(async () => {
+      if (ignored.current.has(turn)) return;
+      const ac = ctx.current;
+      if (audio && ac) {
+        const bytes = Uint8Array.from(atob(audio), (c) => c.charCodeAt(0));
+        const buffer = await ac.decodeAudioData(bytes.buffer);
+        if (ignored.current.has(turn)) return;
+        const src = ac.createBufferSource();
+        src.buffer = buffer;
+        src.connect(ac.destination);
+        const at = Math.max(ac.currentTime + 0.02, playAt.current);
+        src.start(at);
+        playAt.current = at + buffer.duration;
+        sources.current.add(src);
+        src.onended = () => sources.current.delete(src);
+        setTimeout(() => { if (!ignored.current.has(turn)) setCaption(text); }, Math.max(0, (at - ac.currentTime) * 1000));
+      } else if (typeof speechSynthesis !== "undefined") {
+        // No ElevenLabs key (or it failed): the browser's own voice.
+        await new Promise<void>((resolve) => {
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = lang;
+          u.onend = u.onerror = () => resolve();
+          setCaption(text);
+          speechSynthesis.speak(u);
+        });
+      }
+    }).catch((e) => send({ type: "client_log", message: `playback: ${e}` }));
+  }, [send]);
+
+  // Is sound coming out right now?
+  useEffect(() => {
+    const id = setInterval(() => {
+      const ac = ctx.current;
+      const now = !!ac && playAt.current > ac.currentTime + 0.05;
+      const tts = typeof speechSynthesis !== "undefined" && speechSynthesis.speaking;
+      const on = now || tts;
+      if (on !== speakingRef.current) {
+        speakingRef.current = on;
+        setSpeaking(on);
+        worklet.current?.port.postMessage({ muted: on && halfDuplexRef.current });
+      }
+    }, 80);
+    return () => clearInterval(id);
+  }, []);
+
+  // Blinking and talking animation.
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout>;
+    const loop = () => { setBlink(true); setTimeout(() => setBlink(false), 140); t = setTimeout(loop, 2500 + Math.random() * 3000); };
+    t = setTimeout(loop, 2000);
+    return () => clearTimeout(t);
+  }, []);
+  useEffect(() => {
+    if (!speaking) return;
+    const id = setInterval(() => setMouth((m) => !m), 150);
+    return () => clearInterval(id);
+  }, [speaking]);
+
+  // ---- server connection
+
+  useEffect(() => {
+    let closed = false;
+    let retry: ReturnType<typeof setTimeout>;
+    const open = () => {
+      const sock = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/kiosk/ws`);
+      ws.current = sock;
+      sock.onopen = () => setWsUp(true);
+      sock.onclose = () => { setWsUp(false); if (!closed) retry = setTimeout(open, 1500); };
+      sock.onerror = () => sock.close();
+      sock.onmessage = (e) => {
+        const ev = JSON.parse(e.data) as LogEvent;
+        switch (ev.type) {
+          case "snapshot":
+            setLog((ev.log as LogEvent[]) ?? []);
+            setServerState(ev.state as string);
+            setPick(ev.pick as Pick | null);
+            setNotes((ev.notifications as Note[]) ?? []);
+            setConfig(ev.config as Config);
+            setKeys(ev.keys as Keys);
+            return;
+          case "state": setServerState(ev.state as string); return;
+          case "face": setEmotion(ev.face as string); return;
+          case "speech": enqueueSpeech(ev.turn as string, ev.text as string, ev.audio as string | null, (cfgLang.current || "zh-TW")); if (ev.error) addLog({ type: "error", at: ev.at, where: "tts", message: ev.error }); return;
+          case "pick": setPick(ev.pick as Pick); break;
+          case "config": setConfig(ev.config as Config); return;
+          case "notification": setNotes((n) => [ev as unknown as Note, ...n].slice(0, 50)); break;
+          case "notifications_cleared": setNotes([]); return;
+          case "interrupted": stopAudio(); break;
+          case "reset": stopAudio(); setCaption(""); setHeard(""); setEmotion("happy"); break;
+          case "user": setHeard(ev.text as string); break;
+        }
+        addLog(ev);
+      };
+    };
+    open();
+    return () => { closed = true; clearTimeout(retry); ws.current?.close(); };
+  }, [addLog, enqueueSpeech, stopAudio]);
+
+  // ---- microphone -> AssemblyAI
+
+  const startStt = useCallback(async (ac: AudioContext) => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    await ac.audioWorklet.addModule("/pcm-worklet.js");
+    const node = new AudioWorkletNode(ac, "pcm16-downsampler", { processorOptions: { targetRate: 16000 } });
+    const silent = ac.createGain();
+    silent.gain.value = 0;
+    ac.createMediaStreamSource(stream).connect(node).connect(silent).connect(ac.destination);
+    worklet.current = node;
+
+    let sock: WebSocket | null = null;
+    const connect = async () => {
+      setStt("connecting");
+      try {
+        const res = await fetch("/api/kiosk/stt-token");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail ?? res.statusText);
+        sock = new WebSocket(data.url);
+        sock.binaryType = "arraybuffer";
+        sock.onopen = () => setStt("listening");
+        sock.onclose = () => { setStt("reconnecting"); sock = null; setTimeout(connect, 1000); };
+        sock.onerror = () => sock?.close();
+        sock.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.type !== "Turn") return;
+          const text: string = msg.transcript ?? "";
+          if (msg.end_of_turn) {
+            setPartial("");
+            if (text.trim()) {
+              sttEndAt.current = Date.now();
+              send({ type: "user_text", text, metrics: { stt_confidence: msg.end_of_turn_confidence } });
+            }
+            return;
+          }
+          setPartial(text);
+          if (speakingRef.current && speechLength(text) >= BARGE_IN_CHARS) {
+            stopAudio();
+            send({ type: "interrupt" });
+          }
+        };
+      } catch (err) {
+        setStt(`error: ${err instanceof Error ? err.message : err}`);
+        setTimeout(connect, 5000);
+      }
+    };
+    node.port.onmessage = (e) => { if (sock?.readyState === WebSocket.OPEN) sock.send(e.data); };
+    await connect();
+  }, [send, stopAudio]);
+
+  const start = async () => {
+    setError(null);
+    try {
+      const ac = new AudioContext();
+      await ac.resume(); // iOS: audio must be unlocked inside the tap
+      ctx.current = ac;
+      // Keep the iPad screen on.
+      try { await (navigator as Navigator & { wakeLock?: { request: (t: string) => Promise<unknown> } }).wakeLock?.request("screen"); } catch { /* optional */ }
+      setStarted(true);
+      await startStt(ac);
+    } catch (e) {
+      setError(`${e instanceof Error ? e.message : e}. The microphone needs HTTPS: open https://<panel-ip>/kiosk (nginx).`);
+    }
+  };
+
+  // ---- face
+
+  const tool = serverState.startsWith("tool:") ? serverState.slice(5) : null;
+  const moving = !!pick?.active;
+  let face = (FACE[emotion] ?? FACE.happy)[speaking && mouth ? 1 : 0];
+  let label = "";
+  if (!started) { face = "-_-"; label = "點一下開始 · tap to start"; }
+  else if (speaking) { /* emotion face with moving mouth */ }
+  else if (partial) { face = ":o"; }
+  else if (tool === "look_at_table") { face = "o_o"; label = "看一下桌上…"; }
+  else if (tool) { face = "•_•"; label = "查詢中…"; }
+  else if (serverState === "thinking") { face = ":/"; label = "…"; }
+  else if (moving) { face = "^_^"; label = `正在拿${pick?.item_name ?? ""}…`; }
+  if (blink && !speaking) face = face.replace(/^[:;]/, "·");
+
+  const progress = moving && pick ? Math.min(1, pick.elapsed_s / Math.max(1, pick.time_limit_s)) : 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex select-none bg-black text-white" style={{ WebkitUserSelect: "none" }}>
+      <div className="relative flex flex-1 flex-col items-center justify-center" style={{ containerType: "inline-size" }} onClick={!started ? start : undefined}>
+        <div className="font-mono font-bold leading-none tracking-tight transition-transform" style={{ fontSize: "min(30cqw, 48vh)", transform: partial ? "scale(1.04)" : "none" }}>
+          {face}
+        </div>
+        <div className="mt-6 h-10 text-2xl text-white/60">{label}</div>
+        {moving && <div className="mt-2 h-2 w-1/3 overflow-hidden rounded-full bg-white/15"><div className="h-full bg-white/70 transition-all" style={{ width: `${progress * 100}%` }} /></div>}
+        <div className="absolute inset-x-0 bottom-6 px-10 text-center">
+          {partial ? <p className="text-2xl text-white/50">{partial}</p> : heard && !speaking ? <p className="text-xl text-white/30">「{heard}」</p> : null}
+          {caption && (speaking || serverState !== "idle") && <p className="mt-2 text-3xl text-white/85">{caption}</p>}
+        </div>
+        {error && <p className="absolute top-6 mx-8 rounded-lg bg-red-900/80 px-4 py-2 text-lg">{error}</p>}
+        {config && !config.armed && started && <span className="absolute left-4 top-4 rounded-full bg-white/10 px-3 py-1 text-xs text-white/50">arm not armed</span>}
+        {!wsUp && <span className="absolute left-4 top-10 rounded-full bg-red-900/70 px-3 py-1 text-xs">backend offline</span>}
+        <button onClick={(e) => { e.stopPropagation(); setDebug(!debug); }} className="absolute bottom-3 right-3 rounded-md px-3 py-2 font-mono text-xs text-white/25 hover:text-white/70">
+          debug
+        </button>
+      </div>
+      {debug && (
+        <Debug
+          log={log} pick={pick} config={config} notes={notes} keys={keys} wsUp={wsUp} stt={stt} serverState={serverState}
+          monitor={monitor} halfDuplex={halfDuplex} setHalfDuplex={setHalfDuplex} send={send} setConfig={setConfig} sttEndAt={sttEndAt}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------- debug drawer ----------
+
+function Debug({ log, pick, config, notes, keys, wsUp, stt, serverState, monitor, halfDuplex, setHalfDuplex, send, setConfig }: {
+  log: LogEvent[]; pick: Pick | null; config: Config | null; notes: Note[]; keys: Keys | null; wsUp: boolean; stt: string; serverState: string;
+  monitor: boolean; halfDuplex: boolean; setHalfDuplex: (v: boolean) => void; send: (m: object) => void; setConfig: (c: Config) => void; sttEndAt: React.RefObject<number | null>;
+}) {
+  const [text, setText] = useState("");
+  const [tab, setTab] = useState<"log" | "shop" | "setup">("log");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const end = useRef<HTMLDivElement>(null);
+  useEffect(() => { end.current?.scrollIntoView({ block: "end" }); }, [log.length, tab]);
+
+  const save = async (next: Config) => {
+    setConfig(next);
+    setSaveError(null);
+    const res = await fetch("/api/kiosk/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) });
+    if (!res.ok) setSaveError(JSON.stringify((await res.json()).detail ?? res.statusText));
+  };
+  const setItem = (i: number, patch: Partial<Item>) => config && save({ ...config, items: config.items.map((it, j) => (j === i ? { ...it, ...patch } : it)) });
+  const dot = (ok: boolean | undefined) => <span className={`inline-block size-2 rounded-full ${ok ? "bg-green-500" : "bg-red-500"}`} />;
+  const box = "rounded border border-white/15 bg-white/5 px-2 py-1 text-sm text-white";
+
+  return (
+    <aside className="flex w-[min(460px,48vw)] flex-col border-l border-white/10 bg-neutral-950 text-sm text-white/90">
+      <div className="grid gap-1 border-b border-white/10 p-3 font-mono text-xs">
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          <span>{dot(wsUp)} server</span><span>{dot(stt === "listening")} stt: {monitor ? "monitor" : stt}</span><span>state: {serverState}</span>
+        </div>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-white/60">
+          <span>{dot(keys?.anthropic)} anthropic</span><span>{dot(keys?.assemblyai)} assemblyai</span><span>{dot(keys?.elevenlabs)} elevenlabs</span>
+        </div>
+      </div>
+
+      <div className="grid gap-2 border-b border-white/10 p-3">
+        <div className="flex items-center gap-2">
+          <button onClick={() => config && save({ ...config, armed: !config.armed })} className={`flex-1 rounded-md px-3 py-2 font-semibold ${config?.armed ? "bg-green-700" : "bg-neutral-700"}`}>
+            {config?.armed ? "Arm ARMED (tap to disarm)" : "Arm disarmed (tap to arm)"}
+          </button>
+          <button onClick={() => send({ type: "stop_robot" })} className="rounded-md bg-red-700 px-4 py-2 font-bold">STOP</button>
+        </div>
+        {pick && (
+          <div className="flex items-center gap-2 rounded-md bg-white/5 px-2 py-1.5 font-mono text-xs">
+            <span className="flex-1">{pick.simulated ? "[sim] " : ""}{pick.item_name}: {pick.state} · {pick.elapsed_s}s/{pick.time_limit_s}s {pick.detail}</span>
+            {pick.active && <button onClick={() => send({ type: "end_episode" })} className="rounded bg-white/15 px-2 py-1">done → end episode</button>}
+          </div>
+        )}
+        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { send({ type: "user_text", text }); setText(""); } }}>
+          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type as the customer…" className={`${box} flex-1`} />
+          <button className="rounded-md bg-white/15 px-3">Send</button>
+          <button type="button" onClick={() => send({ type: "reset" })} className="rounded-md bg-white/10 px-3" title="Forget the conversation (new customer)">Reset</button>
+        </form>
+      </div>
+
+      <div className="flex border-b border-white/10 text-xs">
+        {(["log", "shop", "setup"] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)} className={`flex-1 py-2 ${tab === t ? "bg-white/10" : "text-white/50"}`}>
+            {t === "shop" ? `shop / owner${notes.length ? ` (${notes.length})` : ""}` : t}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-3">
+        {tab === "log" && (
+          <div className="grid gap-1.5 font-mono text-xs">
+            {log.map((ev, i) => <LogRow key={i} ev={ev} />)}
+            <div ref={end} />
+          </div>
+        )}
+
+        {tab === "shop" && config && (
+          <div className="grid gap-4">
+            <div>
+              <div className="mb-1 flex items-center justify-between text-xs text-white/50">
+                <span>Notes for the owner</span>
+                {notes.length > 0 && <button onClick={() => send({ type: "clear_notifications" })}>clear</button>}
+              </div>
+              {notes.length === 0 && <p className="text-white/40">None.</p>}
+              {notes.map((n, i) => (
+                <p key={i} className={`mb-1 rounded px-2 py-1 ${n.urgent ? "bg-red-900/50" : "bg-white/5"}`}>
+                  <span className="mr-2 font-mono text-xs text-white/40">{new Date(n.at * 1000).toLocaleTimeString()} {n.source}</span>{n.message}
+                </p>
+              ))}
+            </div>
+            <div className="grid gap-2">
+              <span className="text-xs text-white/50">Inventory (simulated)</span>
+              {config.items.map((it, i) => (
+                <div key={it.id} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2 rounded bg-white/5 px-2 py-1.5">
+                  <span>{it.name} <span className="text-white/40">{it.price}</span></span>
+                  <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={it.on_table} onChange={(e) => setItem(i, { on_table: e.target.checked })} /> on table</label>
+                  <label className="flex items-center gap-1 text-xs">back <input type="number" min={0} value={it.back_stock} onChange={(e) => setItem(i, { back_stock: Math.max(0, Number(e.target.value)) })} className={`${box} w-14`} /></label>
+                  <span className="text-xs text-white/50">sold {it.sold}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "setup" && config && <Setup key={JSON.stringify(config)} config={config} save={save} box={box} halfDuplex={halfDuplex} setHalfDuplex={setHalfDuplex} />}
+        {saveError && <p className="mt-2 rounded bg-red-900/60 px-2 py-1 text-xs">{saveError}</p>}
+      </div>
+    </aside>
+  );
+}
+
+function Setup({ config, save, box, halfDuplex, setHalfDuplex }: { config: Config; save: (c: Config) => void; box: string; halfDuplex: boolean; setHalfDuplex: (v: boolean) => void }) {
+  const [draft, setDraft] = useState(config); // remounted (key) when the saved config changes
+  const field = (label: string, el: React.ReactNode) => <label className="grid gap-1 text-xs text-white/60">{label}{el}</label>;
+  const text = (k: keyof Config) => <input value={String(draft[k])} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} className={box} />;
+  const item = (i: number, patch: Partial<Item>) => setDraft({ ...draft, items: draft.items.map((it, j) => (j === i ? { ...it, ...patch } : it)) });
+  return (
+    <div className="grid gap-3">
+      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.simulate_picks} onChange={(e) => setDraft({ ...draft, simulate_picks: e.target.checked })} /> Simulate picks (rehearse without the robot)</label>
+      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={halfDuplex} onChange={(e) => setHalfDuplex(e.target.checked)} /> Mute mic while talking (use if the robot hears itself; this iPad only)</label>
+      <div className="grid grid-cols-2 gap-2">
+        {field("Shop name", text("shop_name"))}
+        {field("Language", text("language"))}
+        {field("Claude model", text("model"))}
+        {field("Effort", <select value={draft.effort} onChange={(e) => setDraft({ ...draft, effort: e.target.value as Config["effort"] })} className={box}><option>low</option><option>medium</option><option>high</option></select>)}
+        {field("ElevenLabs model", text("tts_model"))}
+        {field("ElevenLabs voice id", text("voice_id"))}
+        {field("New customer after idle (s)", <input type="number" value={draft.idle_reset_s} onChange={(e) => setDraft({ ...draft, idle_reset_s: Number(e.target.value) })} className={box} />)}
+      </div>
+      {field("Extra instructions for Claude", <textarea value={draft.extra_instructions} onChange={(e) => setDraft({ ...draft, extra_instructions: e.target.value })} rows={3} className={box} />)}
+      {draft.items.map((it, i) => (
+        <div key={i} className="grid gap-2 rounded border border-white/10 p-2">
+          <div className="grid grid-cols-3 gap-2">
+            {field("id", <input value={it.id} onChange={(e) => item(i, { id: e.target.value })} className={box} />)}
+            {field("Name", <input value={it.name} onChange={(e) => item(i, { name: e.target.value })} className={box} />)}
+            {field("Price", <input value={it.price} onChange={(e) => item(i, { price: e.target.value })} className={box} />)}
+          </div>
+          {field("Where on the table", <input value={it.position} onChange={(e) => item(i, { position: e.target.value })} className={box} />)}
+          {field("Description", <input value={it.description} onChange={(e) => item(i, { description: e.target.value })} className={box} />)}
+          {field("ACT checkpoint on the GPU server", <input value={it.checkpoint} onChange={(e) => item(i, { checkpoint: e.target.value })} placeholder="outputs/.../checkpoints/last/pretrained_model" className={box} />)}
+          <div className="grid grid-cols-[1fr_auto] gap-2">
+            {field("Task text", <input value={it.task} onChange={(e) => item(i, { task: e.target.value })} className={box} />)}
+            {field("Time limit (s)", <input type="number" value={it.episode_time_s} onChange={(e) => item(i, { episode_time_s: Number(e.target.value) })} className={`${box} w-20`} />)}
+          </div>
+        </div>
+      ))}
+      <div className="flex gap-2">
+        <button onClick={() => save(draft)} className="flex-1 rounded-md bg-white/20 py-2 font-semibold">Save</button>
+        <button onClick={() => setDraft({ ...draft, items: [...draft.items, { id: `item_${draft.items.length + 1}`, name: "New item", description: "", price: "", position: "", on_table: true, back_stock: 0, sold: 0, checkpoint: "", task: "", episode_time_s: 40 }] })} className="rounded-md bg-white/10 px-3">+ item</button>
+      </div>
+    </div>
+  );
+}
+
+function LogRow({ ev }: { ev: LogEvent }) {
+  const [open, setOpen] = useState(false);
+  const t = new Date(ev.at * 1000).toLocaleTimeString([], { hour12: false });
+  const head = <span className="text-white/30">{t}</span>;
+  switch (ev.type) {
+    case "user":
+      return <div>{head} <span className="text-sky-300">customer:</span> {String(ev.text)}</div>;
+    case "robot_event":
+      return <div>{head} <span className="text-amber-300">robot event:</span> {String(ev.text)}</div>;
+    case "assistant":
+      return <div>{head} <span className="text-green-300">robot:</span> {String(ev.text)}</div>;
+    case "tool": {
+      const images = (ev.images as string[]) ?? [];
+      return (
+        <div className={`rounded px-1.5 py-1 ${ev.is_error ? "bg-red-900/40" : "bg-white/5"}`}>
+          <button onClick={() => setOpen(!open)} className="text-left">
+            {head} <span className="text-violet-300">tool {String(ev.name)}</span>({JSON.stringify(ev.input)}) <span className="text-white/40">{String(ev.duration_s)}s</span>
+          </button>
+          {open && <pre className="mt-1 whitespace-pre-wrap break-all text-white/60">{String(ev.result)}</pre>}
+          {images.length > 0 && <div className="mt-1 flex gap-1">{images.map((b, i) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img key={i} src={`data:image/jpeg;base64,${b}`} alt="what Claude saw" className="h-24 rounded" />
+          ))}</div>}
+        </div>
+      );
+    }
+    case "turn_done": {
+      const m = ev.metrics as Record<string, number | null>;
+      return <div className="text-white/40">{head} turn: first text {m.first_text_s ?? "–"}s · first audio {m.first_audio_s ?? "–"}s · total {m.total_s}s</div>;
+    }
+    case "llm_step": {
+      const u = ev.usage as Record<string, number | null>;
+      return <div className="text-white/30">{head} {String(ev.model)} {String(ev.stop_reason)} · in {u.input_tokens} (cached {u.cache_read_input_tokens ?? 0}) out {u.output_tokens}</div>;
+    }
+    case "error":
+      return <div className="text-red-400">{head} error [{String(ev.where)}]: {String(ev.message)}</div>;
+    case "notification":
+      return <div className="text-amber-200">{head} owner note: {String(ev.message)}</div>;
+    case "pick": {
+      const p = ev.pick as Pick;
+      return <div className="text-white/50">{head} pick {p.item_name}: {p.state}</div>;
+    }
+    default:
+      return <div className="text-white/40">{head} {ev.type} {ev.reason ? String(ev.reason) : ev.message ? String(ev.message) : ""}</div>;
+  }
+}

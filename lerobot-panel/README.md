@@ -160,6 +160,53 @@ in its own `.data/gpu_connection.json`, with owner-only permissions.
 For persistent hosting, adapt the Jetson systemd example above to execute `gpu_agent`
 on the GPU server. Run only one agent process per checkout; do not add uvicorn workers.
 
+## Shop assistant on the iPad (`/kiosk`)
+
+A voice assistant for the demo where the robot sells cakes: customers talk to an iPad mounted on the robot
+(mainly Taiwanese Mandarin), it recommends, and when they decide it runs the trained ACT pick policy for that
+cake, which puts the cake into the takeaway box.
+
+```
+iPad mic ─► AssemblyAI streaming (direct, temporary token from the panel) ─► transcript ─► panel /api/kiosk/ws
+panel: Claude (tools) ─► sentences ─► ElevenLabs (eleven_v4) ─► mp3 ─► iPad speaker, face, captions
+```
+
+Claude's tools (`server/kiosk.py`): `look_at_table` (chest + overhead camera stills, through the same relay
+as the camera previews), `check_inventory` (simulated stock: on display / in the back / sold), `pick_item`
+(a one-episode live evaluation of that item's checkpoint on the GPU server, i.e. the same job as **Train &
+Eval → Live robot**, without recording), `check_pick_status`, `stop_robot`, and `notify_owner` (notes on the
+owner tab). When a pick ends, the panel marks the item sold, notifies the owner (restock or sold out) and
+tells Claude, which then speaks without waiting to be asked.
+
+Setup:
+
+1. Keys: `cp .env.example .env` in the repo root and fill in `ANTHROPIC_API_KEY`, `ASSEMBLYAI_API_KEY` and
+   `ELEVENLABS_API_KEY`; `./panel` loads `.env` on start (environment variables work too). Without ElevenLabs
+   the iPad uses its built-in voice.
+2. The iPad only allows the microphone over HTTPS, which nginx on the panel machine provides:
+   `deploy/nginx-panel-ssl.conf` (installed as `/etc/nginx/conf.d/panel.ssl.conf`) proxies
+   `https://<panel-ip>/` to the panel on port 8000, WebSockets included, with a self-signed certificate in
+   `/etc/nginx/ssl/`. To trust it on the iPad (no warning, reliable mic): open
+   `http://panel.test/panel-cert.crt` (or `http://<panel-ip>/panel-cert.crt`) in Safari → allow the download, then Settings → Profile Downloaded →
+   Install, then Settings → General → About → Certificate Trust Settings → turn on *AlohaMini Panel*.
+   Then open `https://panel.test/kiosk` (or `https://<panel-ip>/kiosk`) and tap the face once (this unlocks audio and the mic). Use
+   Guided Access to keep the page in front.
+3. **debug** (bottom right) → **setup**: for each cake, the ACT checkpoint path on the GPU server, its task text
+   and a time limit. Edit the description, price and where it sits on the table so Claude describes it correctly.
+   Also: the Claude model (default `claude-opus-5-5` at low effort; a smaller model such as
+   `claude-haiku-5-5` answers faster), the ElevenLabs voice (pick one that speaks Mandarin well) and the language.
+4. Start the robot host **with cameras** and connect the GPU server, as for live evaluation.
+5. Tap **Arm** in the debug drawer when an operator is standing by. Until then the robot will not move, and
+   Claude says so. **STOP** stops a pick at any time; **done → end episode** ends it early once the cake is in
+   the box (otherwise it runs until the time limit).
+
+**Simulate picks** (setup) rehearses the whole conversation without the robot or GPU. Type into the debug
+drawer to talk without a microphone. `/kiosk?monitor=1` on a laptop follows the same conversation (log, tool calls
+with the camera images Claude saw, latency per turn, owner notes) without its own mic or sound. Customers
+can interrupt the robot by talking. If it hears its own voice through the speaker, turn on *Mute mic while
+talking*. The conversation resets after `idle_reset_s` of silence (the next customer). Settings and inventory
+live in `.data/kiosk.json`.
+
 ## Layout
 
 - `server/`: FastAPI backend. It runs the recording engine as a child process, sends it JSON commands and tails its
