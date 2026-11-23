@@ -103,7 +103,9 @@ as with the Jetson agent; the panel/agent connection uses HTTP.
    on that server under **Training options**. Choose a policy, steps and batch size.
    Supplying a pretrained model uses that model's policy type and starts a new
    fine-tuning run. VLA policies need the appropriate pretrained weights. Checkpoints
-   stay local; training does not publish models to the Hub.
+   stay local; training does not publish models to the Hub. When starting from
+   `lerobot/smolvla_base`, the panel maps AlohaMini's `overhead` camera to `camera1`
+   and `chest` to `camera2`, matching `./train_vla`. A third camera is not required.
 2. **Simulation**: select a saved model from **Models in GPU outputs** or enter a model ID, then choose the
    environment, task and episode count. The policy must match the environment's
    observation/action shapes. A policy trained on real Aloha Mini data does not

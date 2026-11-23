@@ -6,6 +6,7 @@ agent; a panel cannot overwrite an existing training run by choosing its name.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -163,6 +164,14 @@ def command(req: JobRequest, output: Path) -> list[str]:
         ]
         if req.dataset_root:
             cmd += [f"--dataset.root={req.dataset_root}"]
+        if req.checkpoint == "lerobot/smolvla_base":
+            # Match train_vla: AlohaMini's cameras use different names from the base model.
+            # SmolVLA accepts the unused camera3; no third recording camera is required.
+            rename_map = {
+                "observation.images.overhead": "observation.images.camera1",
+                "observation.images.chest": "observation.images.camera2",
+            }
+            cmd.append(f"--rename_map={json.dumps(rename_map)}")
         return cmd + chunk_args(req)
     if req.kind == "sim_eval":
         return [

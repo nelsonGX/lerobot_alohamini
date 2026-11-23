@@ -92,6 +92,26 @@ def test_commands_are_literal_argv_and_match_modes(tmp_path):
     assert "--robot.remote_ip=10.0.0.2" in cmd
 
 
+def test_smolvla_base_training_maps_alohamini_cameras(tmp_path):
+    # The checkpoint supplies its type, even if the UI's scratch-policy selector differs.
+    req = gpu_jobs.JobRequest(
+        kind="train", dataset="alohamini/right_arm_pick", policy="act", checkpoint="lerobot/smolvla_base"
+    )
+    cmd = gpu_jobs.command(req, tmp_path)
+    rename_args = [arg for arg in cmd if arg.startswith("--rename_map=")]
+    assert len(rename_args) == 1
+    assert json.loads(rename_args[0].split("=", 1)[1]) == {
+        "observation.images.overhead": "observation.images.camera1",
+        "observation.images.chest": "observation.images.camera2",
+    }
+
+
+@pytest.mark.parametrize("checkpoint", ["", "team/custom_smolvla", "lerobot/pi0_base", "lerobot/pi05_base"])
+def test_other_training_configs_keep_their_camera_names(tmp_path, checkpoint):
+    req = gpu_jobs.JobRequest(kind="train", dataset="team/data", policy="smolvla", checkpoint=checkpoint)
+    assert not any(arg.startswith("--rename_map=") for arg in gpu_jobs.command(req, tmp_path))
+
+
 def test_chunking_and_continuous_options_reach_commands(tmp_path):
     train = gpu_jobs.JobRequest(
         kind="train", dataset="team/data", policy="smolvla", chunk_size=50, n_action_steps=10
