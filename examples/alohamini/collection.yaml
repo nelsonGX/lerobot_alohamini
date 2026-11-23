@@ -1,25 +1,25 @@
 # Data-collection plan. Edited from the panel's Settings; see RECORDING.md for what each field does.
-dataset: alohamini/right_arm_pick
+dataset: alohamini/cake
 default_target: 50
 objects:
 - id: object_1
+  name: cake box
+  color: '#e53935'
+- id: object_2
   name: black umbrella
   color: '#000000'
-- id: object_2
-  name: Gray tape
-  color: '#1c1c1c'
 slots:
 - left
 - right
 tasks:
 - id: pick_object_1
-  text: Pick up the black umbrella and put it in the box
+  text: Pick up the red cake box and put it in the box
   object: object_1
-  target: 150
-- id: pick_object_2
-  text: Pick up the gray tape and put it in the box
-  object: object_2
   target: 100
+- id: pick_object_2
+  text: Pick up the black umbrella and put it in the box
+  object: object_2
+  target: 1
 quality:
   min_episode_s: 3.0
   min_fps_ratio: 0.9
@@ -31,5 +31,5 @@ quality:
   time_limit_margin_s: 0.5
 upload:
   hub_repo_id: ''
-  rsync_dest: root@140.136.155.73:/root/.cache/huggingface/lerobot/alohamini/right_arm_pick
+  rsync_dest: root@140.136.155.73:/root/.cache/huggingface/lerobot/alohamini/cake
 checkpoint_every: 1
