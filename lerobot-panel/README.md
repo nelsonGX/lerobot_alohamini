@@ -196,9 +196,17 @@ Setup:
    Also: the Claude model (default `claude-opus-5-5` at low effort; a smaller model such as
    `claude-haiku-5-5` answers faster), the ElevenLabs voice (pick one that speaks Mandarin well) and the language.
 4. Start the robot host **with cameras** and connect the GPU server, as for live evaluation.
-5. Tap **Arm** in the debug drawer when an operator is standing by. Until then the robot will not move, and
-   Claude says so. **STOP** stops a pick at any time; **done → end episode** ends it early once the cake is in
-   the box (otherwise it runs until the time limit).
+5. Tap **Arm** when an operator is standing by. Arming warms the robot up: one live evaluation job on the
+   GPU server (`kiosk-standby`) loads every cake's checkpoint and connects to the robot (~7 s, shown in the
+   debug drawer), then waits. Each pick is then just a `start <item>` command to that job, so the arm moves
+   within about a second; after the episode it goes back to waiting. Until armed the robot will not move,
+   and Claude says so. **Disarm** unloads the models. **STOP** stops the arm (it holds), unloads the models
+   and disarms until staff re-arm. **done → end episode** ends a pick early once the cake is in the box
+   (otherwise it runs until that cake's time limit). While armed the job owns the robot, so recording,
+   teleoperation and calibration are blocked as during any live evaluation. Changing a checkpoint while
+   armed reloads the job when no pick is running. If the warm job cannot start (for example the GPU server
+   runs an older checkout without `--eval.standby_policies`), each pick falls back to its own job, ~7 s slower.
+   After updating, pull on the GPU server too and restart `./gpu_agent`.
 
 **Simulate picks** (setup) rehearses the whole conversation without the robot or GPU. Type into the debug
 drawer to talk without a microphone. `/kiosk?monitor=1` on a laptop follows the same conversation (log, tool calls

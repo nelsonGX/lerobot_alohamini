@@ -19,6 +19,28 @@ class EpisodeCommand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     command: Literal["success", "fail", "end", "discard", "start"]
+    # Standby jobs: which loaded policy runs the episode that "start" begins.
+    policy: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,40}$")
+
+    @model_validator(mode="after")
+    def policy_only_with_start(self) -> EpisodeCommand:
+        if self.policy and self.command != "start":
+            raise ValueError("Only start takes a policy.")
+        return self
+
+    def line(self) -> str:
+        return f"{self.command} {self.policy}" if self.policy else self.command
+
+
+class StandbyPolicy(BaseModel):
+    """One policy kept loaded by a standby live evaluation (the /kiosk shop assistant uses this)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(pattern=r"^[a-z0-9_]{1,40}$")
+    checkpoint: str = Field(min_length=1, max_length=1000)
+    task: str = Field(default="robot task", min_length=1, max_length=500)
+    episode_time_s: int = Field(default=60, ge=1, le=600)
 
 
 class JobRequest(BaseModel):
@@ -58,6 +80,9 @@ class JobRequest(BaseModel):
     record: bool = True
     # Live robot only: between episodes, hold until the operator presses Start instead of a reset timer.
     wait_for_start: bool = False
+    # Live robot only: load all these policies and connect once, then run one episode per
+    # "start <name>" command until stopped (instead of checkpoint).
+    standby_policies: list[StandbyPolicy] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def validate_job(self) -> JobRequest:
@@ -66,7 +91,14 @@ class JobRequest(BaseModel):
 
             if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*", self.dataset):
                 raise ValueError("Dataset must be a namespace/name (on the GPU server or Hugging Face).")
-        if self.kind != "train" and not self.checkpoint:
+        if self.standby_policies:
+            if self.kind != "robot_eval":
+                raise ValueError("Standby policies are only for live robot evaluation.")
+            if self.record or self.inference != "sync":
+                raise ValueError("Standby evaluation runs without recording and with sync inference.")
+            if len({p.name for p in self.standby_policies}) != len(self.standby_policies):
+                raise ValueError("Standby policy names must be unique.")
+        elif self.kind != "train" and not self.checkpoint:
             raise ValueError("Choose a checkpoint or enter a model repository ID.")
         if self.kind == "robot_eval" and not self.robot_ready:
             raise ValueError("Confirm that the robot workspace is clear and an operator is ready.")
@@ -144,6 +176,27 @@ def command(req: JobRequest, output: Path) -> list[str]:
             f"--eval.n_episodes={req.episodes}",
             f"--eval.batch_size={min(req.batch_size, req.episodes)}",
             f"--output_dir={output}",
+            *chunk_args(req),
+        ]
+    if req.standby_policies:
+        import json
+
+        policies = [
+            {"name": p.name, "path": p.checkpoint, "task": p.task, "episode_time_s": p.episode_time_s}
+            for p in req.standby_policies
+        ]
+        return [
+            PYTHON,
+            str(REPO_ROOT / "examples/alohamini/evaluate_bi.py"),
+            f"--eval.standby_policies={json.dumps(policies, ensure_ascii=False)}",
+            "--dataset.record=false",
+            "--dataset.push_to_hub=false",
+            f"--robot.remote_ip={req.robot_ip}",
+            f"--robot.robot_model={req.robot_model}",
+            f"--fps={req.fps}",
+            "--eval.panel_control=true",
+            f"--output_dir={output}",
+            "--inference.type=sync",
             *chunk_args(req),
         ]
     cmd = [

@@ -13,6 +13,7 @@ type Pick = { job_id: string; item_id: string; item_name: string; state: string;
 type Note = { at: number; message: string; urgent: boolean; source: string };
 type LogEvent = { type: string; at: number; [k: string]: unknown };
 type Keys = { anthropic: boolean; assemblyai: boolean; elevenlabs: boolean };
+type Standby = { job_id: string; state: "off" | "loading" | "ready" | "busy" | "stopping" | "error"; detail: string; policies: string[]; started_at: number | null; ready_at: number | null };
 
 const FACE: Record<string, [string, string]> = {
   // [resting, mouth open] — the second one alternates while talking.
@@ -49,6 +50,7 @@ export default function KioskPage() {
   const [config, setConfig] = useState<Config | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   const [keys, setKeys] = useState<Keys | null>(null);
+  const [standby, setStandby] = useState<Standby | null>(null);
   const [halfDuplex, setHalfDuplex] = useState(false);
   const [blink, setBlink] = useState(false);
   const [mouth, setMouth] = useState(false);
@@ -169,12 +171,14 @@ export default function KioskPage() {
             setNotes((ev.notifications as Note[]) ?? []);
             setConfig(ev.config as Config);
             setKeys(ev.keys as Keys);
+            setStandby(ev.standby as Standby);
             return;
           case "state": setServerState(ev.state as string); return;
           case "face": setEmotion(ev.face as string); return;
           case "speech": enqueueSpeech(ev.turn as string, ev.text as string, ev.audio as string | null, (cfgLang.current || "zh-TW")); if (ev.error) addLog({ type: "error", at: ev.at, where: "tts", message: ev.error }); return;
           case "pick": setPick(ev.pick as Pick); break;
           case "config": setConfig(ev.config as Config); return;
+          case "standby": setStandby(ev.standby as Standby); return;
           case "notification": setNotes((n) => [ev as unknown as Note, ...n].slice(0, 50)); break;
           case "notifications_cleared": setNotes([]); return;
           case "interrupted": stopAudio(); break;
@@ -283,7 +287,11 @@ export default function KioskPage() {
           {caption && (speaking || serverState !== "idle") && <p className="mt-2 text-3xl text-white/85">{caption}</p>}
         </div>
         {error && <p className="absolute top-6 mx-8 rounded-lg bg-red-900/80 px-4 py-2 text-lg">{error}</p>}
-        {config && !config.armed && started && <span className="absolute left-4 top-4 rounded-full bg-white/10 px-3 py-1 text-xs text-white/50">arm not armed</span>}
+        {config && started && (!config.armed || standby?.state === "loading" || standby?.state === "error") && (
+          <span className="absolute left-4 top-4 rounded-full bg-white/10 px-3 py-1 text-xs text-white/50">
+            {!config.armed ? "arm not armed" : standby?.state === "loading" ? "warming up…" : "robot error (see debug)"}
+          </span>
+        )}
         {!wsUp && <span className="absolute left-4 top-10 rounded-full bg-red-900/70 px-3 py-1 text-xs">backend offline</span>}
         <button onClick={(e) => { e.stopPropagation(); setDebug(!debug); }} className="absolute bottom-3 right-3 rounded-md px-3 py-2 font-mono text-xs text-white/25 hover:text-white/70">
           debug
@@ -291,7 +299,7 @@ export default function KioskPage() {
       </div>
       {debug && (
         <Debug
-          log={log} pick={pick} config={config} notes={notes} keys={keys} wsUp={wsUp} stt={stt} serverState={serverState}
+          log={log} pick={pick} config={config} standby={standby} notes={notes} keys={keys} wsUp={wsUp} stt={stt} serverState={serverState}
           monitor={monitor} halfDuplex={halfDuplex} setHalfDuplex={setHalfDuplex} send={send} setConfig={setConfig} sttEndAt={sttEndAt}
         />
       )}
@@ -301,8 +309,8 @@ export default function KioskPage() {
 
 // ---------- debug drawer ----------
 
-function Debug({ log, pick, config, notes, keys, wsUp, stt, serverState, monitor, halfDuplex, setHalfDuplex, send, setConfig }: {
-  log: LogEvent[]; pick: Pick | null; config: Config | null; notes: Note[]; keys: Keys | null; wsUp: boolean; stt: string; serverState: string;
+function Debug({ log, pick, config, standby, notes, keys, wsUp, stt, serverState, monitor, halfDuplex, setHalfDuplex, send, setConfig }: {
+  log: LogEvent[]; pick: Pick | null; config: Config | null; standby: Standby | null; notes: Note[]; keys: Keys | null; wsUp: boolean; stt: string; serverState: string;
   monitor: boolean; halfDuplex: boolean; setHalfDuplex: (v: boolean) => void; send: (m: object) => void; setConfig: (c: Config) => void; sttEndAt: React.RefObject<number | null>;
 }) {
   const [text, setText] = useState("");
@@ -337,8 +345,9 @@ function Debug({ log, pick, config, notes, keys, wsUp, stt, serverState, monitor
           <button onClick={() => config && save({ ...config, armed: !config.armed })} className={`flex-1 rounded-md px-3 py-2 font-semibold ${config?.armed ? "bg-green-700" : "bg-neutral-700"}`}>
             {config?.armed ? "Arm ARMED (tap to disarm)" : "Arm disarmed (tap to arm)"}
           </button>
-          <button onClick={() => send({ type: "stop_robot" })} className="rounded-md bg-red-700 px-4 py-2 font-bold">STOP</button>
+          <button onClick={() => send({ type: "stop_robot" })} className="rounded-md bg-red-700 px-4 py-2 font-bold" title="Stop the arm, unload the models and disarm">STOP</button>
         </div>
+        <StandbyLine standby={standby} config={config} />
         {pick && (
           <div className="flex items-center gap-2 rounded-md bg-white/5 px-2 py-1.5 font-mono text-xs">
             <span className="flex-1">{pick.simulated ? "[sim] " : ""}{pick.item_name}: {pick.state} · {pick.elapsed_s}s/{pick.time_limit_s}s {pick.detail}</span>
@@ -360,7 +369,7 @@ function Debug({ log, pick, config, notes, keys, wsUp, stt, serverState, monitor
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3">
+      <div className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3">
         {tab === "log" && (
           <div className="grid gap-1.5 font-mono text-xs">
             {log.map((ev, i) => <LogRow key={i} ev={ev} />)}
@@ -403,9 +412,29 @@ function Debug({ log, pick, config, notes, keys, wsUp, stt, serverState, monitor
   );
 }
 
+function StandbyLine({ standby, config }: { standby: Standby | null; config: Config | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
+  if (!config) return null;
+  if (config.simulate_picks) return <p className="text-xs text-white/50">Simulated picks: nothing loads on the GPU.</p>;
+  const s = standby?.state ?? "off";
+  const since = standby?.started_at ? Math.max(0, Math.round(now / 1000 - standby.started_at)) : 0;
+  const text = {
+    off: config.armed ? "Models not loaded (no checkpoints set, or waiting to retry)." : "Models unloaded. Arm to warm up (~7 s).",
+    loading: `Warming up: loading ${standby?.policies.join(", ")} and connecting… ${since}s`,
+    ready: `Warm: ${standby?.policies.join(", ")} loaded; picks start immediately.`,
+    busy: "Warm: running a pick.",
+    stopping: "Unloading…",
+    error: `Not warm: ${standby?.detail} (picks fall back to a cold start)`,
+  }[s];
+  const color = s === "ready" || s === "busy" ? "text-green-400" : s === "error" ? "text-red-400" : "text-white/60";
+  return <p className={`text-xs ${color}`}>{text}</p>;
+}
+
 function Setup({ config, save, box, halfDuplex, setHalfDuplex }: { config: Config; save: (c: Config) => void; box: string; halfDuplex: boolean; setHalfDuplex: (v: boolean) => void }) {
   const [draft, setDraft] = useState(config); // remounted (key) when the saved config changes
-  const field = (label: string, el: React.ReactNode) => <label className="grid gap-1 text-xs text-white/60">{label}{el}</label>;
+  const catalog = useCatalog();
+  const field = (label: string, el: React.ReactNode) => <label className="grid min-w-0 gap-1 text-xs text-white/60">{label}{el}</label>;
   const text = (k: keyof Config) => <input value={String(draft[k])} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} className={box} />;
   const item = (i: number, patch: Partial<Item>) => setDraft({ ...draft, items: draft.items.map((it, j) => (j === i ? { ...it, ...patch } : it)) });
   return (
@@ -422,16 +451,20 @@ function Setup({ config, save, box, halfDuplex, setHalfDuplex }: { config: Confi
         {field("New customer after idle (s)", <input type="number" value={draft.idle_reset_s} onChange={(e) => setDraft({ ...draft, idle_reset_s: Number(e.target.value) })} className={box} />)}
       </div>
       {field("Extra instructions for Claude", <textarea value={draft.extra_instructions} onChange={(e) => setDraft({ ...draft, extra_instructions: e.target.value })} rows={3} className={box} />)}
+      <div className="flex items-center justify-between text-xs text-white/50">
+        <span>{catalog.error ? `Checkpoints: ${catalog.error}` : catalog.data ? `${catalog.data.runs.length} runs on the GPU server` : "Loading checkpoints…"}</span>
+        <button onClick={catalog.reload} className="rounded bg-white/10 px-2 py-1">refresh</button>
+      </div>
       {draft.items.map((it, i) => (
         <div key={i} className="grid gap-2 rounded border border-white/10 p-2">
           <div className="grid grid-cols-3 gap-2">
-            {field("id", <input value={it.id} onChange={(e) => item(i, { id: e.target.value })} className={box} />)}
-            {field("Name", <input value={it.name} onChange={(e) => item(i, { name: e.target.value })} className={box} />)}
-            {field("Price", <input value={it.price} onChange={(e) => item(i, { price: e.target.value })} className={box} />)}
+            {field("id", <input value={it.id} onChange={(e) => item(i, { id: e.target.value })} className={`${box} w-full`} />)}
+            {field("Name", <input value={it.name} onChange={(e) => item(i, { name: e.target.value })} className={`${box} w-full`} />)}
+            {field("Price", <input value={it.price} onChange={(e) => item(i, { price: e.target.value })} className={`${box} w-full`} />)}
           </div>
           {field("Where on the table", <input value={it.position} onChange={(e) => item(i, { position: e.target.value })} className={box} />)}
           {field("Description", <input value={it.description} onChange={(e) => item(i, { description: e.target.value })} className={box} />)}
-          {field("ACT checkpoint on the GPU server", <input value={it.checkpoint} onChange={(e) => item(i, { checkpoint: e.target.value })} placeholder="outputs/.../checkpoints/last/pretrained_model" className={box} />)}
+          {field("ACT checkpoint on the GPU server", <CheckpointSelect value={it.checkpoint} onChange={(checkpoint) => item(i, { checkpoint })} catalog={catalog} box={box} />)}
           <div className="grid grid-cols-[1fr_auto] gap-2">
             {field("Task text", <input value={it.task} onChange={(e) => item(i, { task: e.target.value })} className={box} />)}
             {field("Time limit (s)", <input type="number" value={it.episode_time_s} onChange={(e) => item(i, { episode_time_s: Number(e.target.value) })} className={`${box} w-20`} />)}
@@ -442,6 +475,61 @@ function Setup({ config, save, box, halfDuplex, setHalfDuplex }: { config: Confi
         <button onClick={() => save(draft)} className="flex-1 rounded-md bg-white/20 py-2 font-semibold">Save</button>
         <button onClick={() => setDraft({ ...draft, items: [...draft.items, { id: `item_${draft.items.length + 1}`, name: "New item", description: "", price: "", position: "", on_table: true, back_stock: 0, sold: 0, checkpoint: "", task: "", episode_time_s: 40 }] })} className="rounded-md bg-white/10 px-3">+ item</button>
       </div>
+    </div>
+  );
+}
+
+// ---------- checkpoint dropdown (same scan as Train & Eval: the GPU server's outputs/) ----------
+
+type Checkpoint = { path: string; label: string; step: number | null; policy: string; latest: boolean; modified_at: number };
+type Catalog = { root: string; runs: { name: string; checkpoints: Checkpoint[] }[] };
+
+function useCatalog() {
+  const [data, setData] = useState<Catalog | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    let live = true;
+    fetch("/api/gpu/checkpoints")
+      .then(async (res) => {
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.detail ?? res.statusText);
+        if (live) { setData(body as Catalog); setError(null); }
+      })
+      .catch((e) => { if (live) setError(e instanceof Error ? e.message : String(e)); });
+    return () => { live = false; };
+  }, [version]);
+  return { data, error, reload: () => setVersion((v) => v + 1) };
+}
+
+const CUSTOM = "__custom__";
+
+function CheckpointSelect({ value, onChange, catalog, box }: { value: string; onChange: (v: string) => void; catalog: ReturnType<typeof useCatalog>; box: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const all = catalog.data?.runs.flatMap((r) => r.checkpoints) ?? [];
+  const known = all.some((c) => c.path === value);
+  const [custom, setCustom] = useState(!!value && !known && !!catalog.data);
+  const runs = (catalog.data?.runs ?? []).map((r) => ({ ...r, checkpoints: r.checkpoints.filter((c) => showAll || c.latest || c.path === value) }));
+  const selectValue = custom || (value && !known) ? CUSTOM : value;
+  return (
+    <div className="grid min-w-0 gap-1">
+      <div className="flex min-w-0 gap-2">
+        <select value={selectValue} onChange={(e) => { const v = e.target.value; setCustom(v === CUSTOM); if (v !== CUSTOM) onChange(v); }} className={`${box} w-0 min-w-0 flex-1`}>
+          <option value="">— none (robot can&apos;t pick this) —</option>
+          {runs.map((r) => (
+            <optgroup key={r.name} label={r.name}>
+              {r.checkpoints.map((c) => (
+                <option key={c.path} value={c.path}>
+                  {r.name} · {c.step != null ? `step ${c.step}` : c.label}{c.latest ? " (latest)" : ""} · {c.policy}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+          <option value={CUSTOM}>Other path or Hub model id…</option>
+        </select>
+        <label className="flex items-center gap-1 whitespace-nowrap text-white/50"><input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} /> all steps</label>
+      </div>
+      {selectValue === CUSTOM && <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="/path/to/checkpoints/last/pretrained_model or user/model" className={box} />}
     </div>
   );
 }

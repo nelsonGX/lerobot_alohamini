@@ -345,3 +345,43 @@ def test_panel_refuses_eval_when_teleop_running(monkeypatch):
         )
         assert res.status_code == 409
         assert "Stop recording" in res.json()["detail"]
+
+
+def test_standby_job_loads_named_policies_and_starts_them_by_name(client, monkeypatch, tmp_path):
+    policies = [
+        {"name": "strawberry_cake", "checkpoint": "/ckpt/straw", "task": "撿草莓蛋糕", "episode_time_s": 40},
+        {"name": "tiramisu", "checkpoint": "/ckpt/tira", "task": "pick tiramisu", "episode_time_s": 30},
+    ]
+    req = gpu_jobs.JobRequest(kind="robot_eval", standby_policies=policies, record=False, robot_ready=True)
+    cmd = gpu_jobs.command(req, tmp_path)
+    (arg,) = [a for a in cmd if a.startswith("--eval.standby_policies=")]
+    assert [p["name"] for p in json.loads(arg.split("=", 1)[1])] == ["strawberry_cake", "tiramisu"]
+    assert "撿草莓蛋糕" in arg and not any(a.startswith("--policy.path") for a in cmd)
+    assert "--eval.panel_control=true" in cmd and "--dataset.record=false" in cmd
+    for bad in [
+        {"standby_policies": policies, "record": True, "dataset": "team/x"},
+        {"standby_policies": [policies[0], policies[0]]},
+        {"standby_policies": [{**policies[0], "name": "Bad Name"}]},
+        {"standby_policies": policies, "inference": "rtc"},
+    ]:
+        with pytest.raises(ValidationError):
+            gpu_jobs.JobRequest(**{"kind": "robot_eval", "record": False, "robot_ready": True, **bad})
+    with pytest.raises(ValidationError):
+        gpu_jobs.EpisodeCommand(command="end", policy="tiramisu")
+
+    echo = "import sys\nfor line in sys.stdin:\n    print('got', line.strip(), flush=True)"
+    monkeypatch.setattr(gpu_agent, "command", lambda req, output: [sys.executable, "-c", echo])
+    job_id = client.post("/jobs", json=req.model_dump()).json()["id"]
+    assert (
+        client.post(f"/jobs/{job_id}/command", json={"command": "start", "policy": "../x"}).status_code == 422
+    )
+    assert (
+        client.post(f"/jobs/{job_id}/command", json={"command": "start", "policy": "tiramisu"}).status_code
+        == 200
+    )
+    deadline = time.monotonic() + 6
+    while not any("got start tiramisu" in line for line in client.get(f"/jobs/{job_id}").json()["lines"]):
+        assert time.monotonic() < deadline, "command never reached the program"
+        time.sleep(0.05)
+    client.post(f"/jobs/{job_id}/stop")
+    wait_done(client, job_id)

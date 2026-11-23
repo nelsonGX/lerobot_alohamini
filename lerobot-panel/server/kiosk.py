@@ -37,6 +37,8 @@ EVENT_PREFIX = "[EVAL:event] "  # examples/alohamini/eval_control.py
 FACES = ("happy", "excited", "thinking", "sad", "surprised", "love", "neutral")
 MAX_TOOL_STEPS = 8
 PICK_POLL_S = 1.0
+STANDBY_JOB_NAME = "kiosk-standby"
+STANDBY_START_TIMEOUT_S = 120  # a pick waiting for the warm job to load (or to be idle) gives up after this
 SIM_PICK_S = 8  # how long a simulated pick pretends to take
 
 # ---------- config & simulated inventory (one JSON file, edited from the kiosk's debug drawer) ----------
@@ -348,6 +350,7 @@ class Pick(BaseModel):
     episode_started_at: float | None = None
     ended_at: float | None = None
     simulated: bool = False
+    mode: Literal["job", "standby", "sim"] = "job"  # standby: one episode of the warm job
 
     @property
     def active(self) -> bool:
@@ -371,6 +374,47 @@ def pick_request(item: Item):
         reset_time_s=0,
         record=False,
         robot_ready=True,
+    )
+
+
+class Standby(BaseModel):
+    """The warm live-evaluation job: every item's policy loaded and the robot connected while armed."""
+
+    job_id: str = ""
+    state: Literal["off", "loading", "ready", "busy", "stopping", "error"] = "off"
+    detail: str = ""
+    policies: list[str] = Field(default_factory=list)
+    signature: str = ""
+    started_at: float | None = None
+    ready_at: float | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.state in ("loading", "ready", "busy")
+
+
+def standby_policies(cfg: KioskConfig) -> list[dict]:
+    return [
+        {
+            "name": i.id,
+            "checkpoint": i.checkpoint,
+            "task": i.task or f"Pick the {i.name} and put it in the box",
+            "episode_time_s": i.episode_time_s,
+        }
+        for i in cfg.items
+        if i.checkpoint
+    ]
+
+
+def standby_signature(policies: list[dict]) -> str:
+    return json.dumps(policies, sort_keys=True, ensure_ascii=False)
+
+
+def standby_request(policies: list[dict]):
+    from gpu_jobs import JobRequest
+
+    return JobRequest(
+        kind="robot_eval", name=STANDBY_JOB_NAME, standby_policies=policies, record=False, robot_ready=True
     )
 
 
@@ -479,6 +523,10 @@ class Session:
         self.state = "idle"
         self.pick: Pick | None = None
         self.pick_task: asyncio.Task | None = None
+        self.standby = Standby()
+        self.standby_task: asyncio.Task | None = None
+        self._standby_lock: asyncio.Lock | None = None
+        self._stop_requested: set[str] = set()  # warm jobs we asked to stop (their end is not an error)
         self.notifications: deque[dict] = deque(maxlen=50)
         self.last_activity = time.time()
         self._client = None
@@ -522,6 +570,7 @@ class Session:
         return {
             "type": "snapshot", "state": self.state, "log": list(self.log),
             "pick": self.pick.summary() if self.pick else None, "notifications": list(self.notifications),
+            "standby": self.standby.model_dump(),
             "config": store.load().model_dump(), "keys": keys_status(),
         }  # fmt: skip
 
@@ -761,9 +810,12 @@ class Session:
             "total_available": int(i.on_table) + i.back_stock,
             "robot_can_pick": bool(i.checkpoint) or cfg.simulate_picks,
         } for i in cfg.items]  # fmt: skip
-        note = (
-            "" if cfg.armed else " The robot arm is currently NOT armed by staff, so picks will be refused."
-        )
+        if not cfg.armed:
+            note = " The robot arm is currently NOT armed by staff, so picks will be refused."
+        elif self.standby.state == "loading":
+            note = " The arm is still warming up; a pick started now begins as soon as it is ready."
+        else:
+            note = ""
         return json.dumps({"items": rows}, ensure_ascii=False) + note
 
     async def tool_pick_item(self, item_id: str) -> str:
@@ -792,19 +844,31 @@ class Session:
         else:
             if not item.checkpoint:
                 raise ToolError(f"No trained pick policy is configured for the {item.name}.")
-            try:
-                job = await asyncio.to_thread(_hooks["start_job"], pick_request(item))
-            except HTTPException as e:
-                raise ToolError(f"The robot could not start: {e.detail}") from None
-            self.pick = Pick(
-                job_id=job["id"],
-                item_id=item.id,
-                item_name=item.name,
-                started_at=time.time(),
-                time_limit_s=item.episode_time_s,
-            )
+            await self.ensure_standby(cfg)
+            if self.standby.running and item.id in self.standby.policies:
+                # Warm path: the policy is already loaded; one command starts the episode.
+                try:
+                    await asyncio.to_thread(
+                        _hooks["gpu_call"], "POST", f"/jobs/{self.standby.job_id}/command",
+                        {"command": "start", "policy": item.id},
+                    )  # fmt: skip
+                except HTTPException as e:
+                    raise ToolError(f"The robot could not start: {e.detail}") from None
+                self.pick = Pick(job_id=self.standby.job_id, item_id=item.id, item_name=item.name,
+                                 started_at=time.time(), time_limit_s=item.episode_time_s, mode="standby")  # fmt: skip
+            else:
+                # Cold path (no warm job, e.g. the GPU server runs older code): one job for this pick.
+                try:
+                    job = await asyncio.to_thread(_hooks["start_job"], pick_request(item))
+                except HTTPException as e:
+                    raise ToolError(f"The robot could not start: {e.detail}") from None
+                self.pick = Pick(job_id=job["id"], item_id=item.id, item_name=item.name, started_at=time.time(),
+                                 time_limit_s=item.episode_time_s)  # fmt: skip
+        if cfg.simulate_picks:
+            self.pick.mode = "sim"
         await self.emit({"type": "pick", "pick": self.pick.summary()})
-        self.pick_task = asyncio.create_task(self._watch_pick(self.pick))
+        if self.pick.mode != "standby":  # the standby watcher follows warm picks
+            self.pick_task = asyncio.create_task(self._watch_pick(self.pick))
         return (
             f"Started picking the {item.name} (up to {self.pick.time_limit_s} s). "
             "You will get a [Robot event] when it ends."
@@ -834,21 +898,183 @@ class Session:
         await self.emit({"type": "notification", **note})
 
     async def stop_pick(self) -> None:
+        """STOP: end the pick and unload the warm job (the arm holds), and disarm until staff re-arm."""
+        if store.load().armed:
+            cfg = store.update(lambda c: setattr(c, "armed", False))
+            await self.emit({"type": "config", "config": cfg.model_dump()}, keep=False)
+            await self.notify("Robot stopped and disarmed. Re-arm it in the debug drawer.", urgent=True)
         pick = self.pick
-        if not pick or not pick.active:
+        if pick and pick.active:
+            pick.state = "stopping"
+            if pick.mode == "job":
+                try:
+                    await asyncio.to_thread(_hooks["gpu_call"], "POST", f"/jobs/{pick.job_id}/stop")
+                except HTTPException as e:
+                    pick.detail = f"Stop failed: {e.detail}"
+            await self.emit({"type": "pick", "pick": pick.summary()})
+        await self.stop_standby()
+
+    # -- the warm job
+
+    def _lock(self) -> asyncio.Lock:
+        if self._standby_lock is None:
+            self._standby_lock = asyncio.Lock()
+        return self._standby_lock
+
+    async def _set_standby(self, **changes) -> None:
+        for key, value in changes.items():
+            setattr(self.standby, key, value)
+        await self.emit({"type": "standby", "standby": self.standby.model_dump()}, keep=False)
+
+    async def config_changed(self, cfg: KioskConfig) -> None:
+        """Arm loads the policies (warm), disarm unloads them; changed checkpoints reload while idle."""
+        try:
+            if cfg.armed and not cfg.simulate_picks:
+                await self.ensure_standby(cfg)
+            elif self.standby.running or self.standby.state == "error":
+                await self.stop_standby()
+        except Exception as e:  # noqa: BLE001
+            await self._set_standby(state="error", detail=f"{type(e).__name__}: {e}")
+
+    async def ensure_standby(self, cfg: KioskConfig) -> None:
+        policies = standby_policies(cfg)
+        if not policies or cfg.simulate_picks or "gpu_call" not in _hooks:
             return
-        pick.state = "stopping"
-        if not pick.simulated:
+        signature = standby_signature(policies)
+        async with self._lock():
+            if self.standby.running and self.standby.signature == signature:
+                return
+            if self.standby.running:
+                if self.pick and self.pick.active:
+                    return  # reload after this pick
+                await self._stop_standby_job(wait=True)
+            gpu = _hooks["gpu_call"]
+            # After a panel restart the warm job may still be running on the GPU server: adopt it.
             try:
-                await asyncio.to_thread(_hooks["gpu_call"], "POST", f"/jobs/{pick.job_id}/stop")
+                jobs = (await asyncio.to_thread(gpu, "GET", "/status"))["jobs"]
             except HTTPException as e:
-                pick.detail = f"Stop failed: {e.detail}"
+                await self._set_standby(state="error", detail=str(e.detail))
+                return
+            for job in jobs:
+                if job["name"] == STANDBY_JOB_NAME and job["state"] in ("running", "stopping"):
+                    record = await asyncio.to_thread(gpu, "GET", f"/jobs/{job['id']}")
+                    theirs = standby_signature(record["request"].get("standby_policies") or [])
+                    if job["state"] == "running" and theirs == signature:
+                        await self._adopt(job["id"], policies, signature, record["started_at"])
+                        return
+                    await asyncio.to_thread(gpu, "POST", f"/jobs/{job['id']}/stop")
+                    await self._wait_job_end(job["id"])
+            try:
+                job = await asyncio.to_thread(_hooks["start_job"], standby_request(policies))
+            except HTTPException as e:
+                detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)[:300]
+                await self._set_standby(state="error", detail=f"Could not warm up: {detail}", job_id="")
+                return
+            await self._adopt(job["id"], policies, signature, time.time())
+
+    async def _adopt(self, job_id: str, policies: list[dict], signature: str, started_at: float) -> None:
+        self.standby = Standby(job_id=job_id, state="loading", policies=[p["name"] for p in policies],
+                               signature=signature, started_at=started_at)  # fmt: skip
+        await self._set_standby()
+        self.standby_task = asyncio.create_task(self._watch_standby(job_id))
+
+    async def stop_standby(self) -> None:
+        async with self._lock():
+            await self._stop_standby_job(wait=False)
+
+    async def _stop_standby_job(self, wait: bool) -> None:
+        job_id = self.standby.job_id
+        if not job_id or not self.standby.running:
+            await self._set_standby(state="off", detail="")
+            return
+        self._stop_requested.add(job_id)
+        await self._set_standby(state="stopping")
+        try:
+            await asyncio.to_thread(_hooks["gpu_call"], "POST", f"/jobs/{job_id}/stop")
+        except HTTPException as e:
+            await self._set_standby(state="error", detail=f"Stop failed: {e.detail}")
+            return
+        if wait:
+            await self._wait_job_end(job_id)
+
+    async def _wait_job_end(self, job_id: str, timeout: float = 30) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                record = await asyncio.to_thread(_hooks["gpu_call"], "GET", f"/jobs/{job_id}")
+                if record["state"] not in ("running", "stopping"):
+                    return
+            except HTTPException:
+                pass
+            await asyncio.sleep(PICK_POLL_S)
+
+    async def _watch_standby(self, job_id: str) -> None:
+        """Follow the warm job's [EVAL:event] lines: loading -> ready -> busy (a pick) -> ready ..."""
+        seen: set = set()
+        failures = 0
+        while self.standby.job_id == job_id:
+            try:
+                record = await asyncio.to_thread(_hooks["gpu_call"], "GET", f"/jobs/{job_id}")
+                failures = 0
+            except HTTPException as e:
+                failures += 1
+                if failures >= 20:
+                    await self._set_standby(state="error", detail=str(e.detail))
+                    return
+                await asyncio.sleep(PICK_POLL_S)
+                continue
+            pick = self.pick if self.pick and self.pick.active and self.pick.job_id == job_id else None
+            for ev in eval_events(record.get("lines") or []):
+                key = (ev.get("event"), ev.get("episode"), ev.get("at"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                kind = ev.get("event")
+                if job_id in self._stop_requested and kind != "episode_end":
+                    continue
+                if kind == "waiting":
+                    await self._set_standby(
+                        state="ready", detail="", ready_at=self.standby.ready_at or ev.get("at")
+                    )
+                elif kind == "episode_start":
+                    await self._set_standby(state="busy")
+                    if pick and pick.state == "starting" and ev.get("policy") == pick.item_id:
+                        pick.state, pick.episode_started_at = "running", ev.get("at", time.time())
+                        await self.emit({"type": "pick", "pick": pick.summary()}, keep=False)
+                elif kind == "episode_end" and pick and pick.state in ("running", "stopping"):
+                    pick.state = "succeeded" if pick.state == "running" else "stopped"
+                    await self._end_pick(pick)
+                    pick = None
+            if pick and pick.state == "starting" and time.time() - pick.started_at > STANDBY_START_TIMEOUT_S:
+                pick.state, pick.detail = "error", "the warm job never started the episode"
+                await self._end_pick(pick)
+                pick = None
+            if record["state"] not in ("running", "stopping"):
+                ended_by_us = job_id in self._stop_requested
+                tail = " ".join((record.get("lines") or [])[-3:])[-300:]
+                await self._set_standby(
+                    state="off" if ended_by_us else "error",
+                    detail="" if ended_by_us else f"Warm job ended ({record['state']}): {tail}",
+                )
+                if pick:
+                    pick.state = "stopped" if record["state"] == "stopped" else "failed"
+                    pick.detail = pick.detail or record["state"]
+                    await self._end_pick(pick)
+                return
+            if pick:
+                await self.emit({"type": "pick", "pick": pick.summary()}, keep=False)
+            await asyncio.sleep(PICK_POLL_S)
+
+    async def _end_pick(self, pick: Pick) -> None:
+        pick.ended_at = time.time()
         await self.emit({"type": "pick", "pick": pick.summary()})
+        # React in the background: the watcher keeps following the warm job meanwhile.
+        self.pick_task = asyncio.create_task(self._pick_finished(pick))
 
     async def end_episode(self) -> None:
         """Staff button: the cake is in the box, end the episode now instead of waiting for the time limit."""
         pick = self.pick
-        if pick and pick.active and not pick.simulated:
+        if pick and pick.active and pick.mode != "sim":
             await asyncio.to_thread(
                 _hooks["gpu_call"], "POST", f"/jobs/{pick.job_id}/command", {"command": "end"}
             )
@@ -954,6 +1180,8 @@ def get_config() -> KioskConfig:
 async def put_config(cfg: KioskConfig) -> KioskConfig:
     saved = store.save(cfg)
     await session.emit({"type": "config", "config": saved.model_dump()}, keep=False)
+    # Arming warms the robot up (loads every item's policy); disarming unloads it.
+    asyncio.create_task(session.config_changed(saved))
     return saved
 
 

@@ -2,8 +2,10 @@
 
 import argparse
 import inspect
+import json
 import logging
 import math
+import re
 import signal
 import sys
 import time
@@ -93,6 +95,86 @@ def apply_action_overrides(
     policy_cfg.n_action_steps = n_action_steps
 
 
+STANDBY_NAME = re.compile(r"^[a-z0-9_]{1,40}$")
+
+
+def parse_standby_policies(text: str) -> list[dict]:
+    """--eval.standby_policies: a JSON list of {"name", "path", "task", "episode_time_s"?}."""
+    try:
+        specs = json.loads(text)
+    except ValueError as e:
+        raise ValueError(f"--eval.standby_policies is not valid JSON: {e}") from None
+    if not isinstance(specs, list) or not specs:
+        raise ValueError("--eval.standby_policies must be a non-empty JSON list")
+    seen = set()
+    parsed = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            raise ValueError("Each standby policy must be an object")
+        name, path = spec.get("name"), spec.get("path")
+        if not isinstance(name, str) or not STANDBY_NAME.match(name) or name in seen:
+            raise ValueError(f"Standby policy names must be unique and match [a-z0-9_]{{1,40}}: {name!r}")
+        if not isinstance(path, str) or not path:
+            raise ValueError(f"Standby policy {name} needs a path")
+        episode_time = spec.get("episode_time_s")
+        if episode_time is not None and (not isinstance(episode_time, (int, float)) or episode_time <= 0):
+            raise ValueError(f"Standby policy {name}: episode_time_s must be positive")
+        seen.add(name)
+        parsed.append({"name": name, "path": path, "task": str(spec.get("task") or "robot task"),
+                       "episode_time_s": episode_time})  # fmt: skip
+    return parsed
+
+
+def load_policy(path: str, args, device: str):
+    """Load one checkpoint onto the device; returns (config, policy, inference config)."""
+    policy_cfg = PreTrainedConfig.from_pretrained(path)
+    policy_cfg.pretrained_path = path
+    apply_action_overrides(policy_cfg, args.n_action_steps, args.temporal_ensemble_coeff)
+    policy_class = get_policy_class(policy_cfg.type)
+    policy = policy_class.from_pretrained(path, config=policy_cfg)
+
+    # === Inference engine config (needs to be set up before .to(device)/.eval(), mirroring
+    # lerobot.rollout.context.build_rollout_context) ===
+    if args.inference_type == "rtc":
+        predict_chunk_params = inspect.signature(policy_class.predict_action_chunk).parameters
+        accepts_rtc_kwargs = {"inference_delay", "prev_chunk_left_over"}.issubset(
+            predict_chunk_params
+        ) or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in predict_chunk_params.values())
+        if not accepts_rtc_kwargs:
+            raise ValueError(
+                f"Policy type '{policy_cfg.type}' does not support RTC inference: "
+                f"predict_action_chunk() has no inference_delay/prev_chunk_left_over/**kwargs. "
+                f"RTC is only supported by VLA-style policies (pi0, pi05, pi0_fast, smolvla, evo1, "
+                f"molmoact2). Use --inference.type=sync instead."
+            )
+        rtc_config = RTCConfig(
+            execution_horizon=args.rtc_execution_horizon,
+            max_guidance_weight=args.rtc_max_guidance_weight,
+        )
+        policy.config.rtc_config = rtc_config
+        if hasattr(policy, "init_rtc_processor"):
+            policy.init_rtc_processor()
+        inference_cfg = RTCInferenceConfig(rtc=rtc_config, queue_threshold=args.rtc_queue_threshold)
+    else:
+        inference_cfg = SyncInferenceConfig()
+
+    policy = policy.to(device)
+    policy.eval()
+    return policy_cfg, policy, inference_cfg
+
+
+def stop_all(engines) -> None:
+    """Stop every engine, even if one of them fails, then report the first failure."""
+    error = None
+    for engine in engines:
+        try:
+            engine.stop()
+        except Exception as e:  # noqa: BLE001
+            error = error or e
+    if error is not None:
+        raise error
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate AlohaMini robot with a pretrained policy")
     parser.add_argument("--eval.n_episodes", "--num_episodes", dest="num_episodes", type=int, default=2)
@@ -113,7 +195,7 @@ def main():
         type=str,
         default="robot task",
     )
-    parser.add_argument("--policy.path", "--hf_model_id", dest="policy_path", type=str, required=True)
+    parser.add_argument("--policy.path", "--hf_model_id", dest="policy_path", type=str, default="")
     parser.add_argument("--dataset.repo_id", "--hf_dataset_id", dest="dataset_repo_id", type=str, default="")
     parser.add_argument(
         "--dataset.record",
@@ -154,6 +236,16 @@ def main():
         default=False,
         help="Between episodes, wait for a start command instead of --eval.reset_time_s "
         "(requires --eval.panel_control).",
+    )
+    parser.add_argument(
+        "--eval.standby_policies",
+        dest="standby_policies",
+        type=str,
+        default="",
+        help='Standby mode (instead of --policy.path): JSON list of {"name", "path", "task", '
+        '"episode_time_s"}. All policies are loaded and the robot connected up front; then each '
+        '"start <name>" command runs one episode with that policy and returns to waiting, until '
+        "stopped. Requires --eval.panel_control; implies --eval.continuous and --eval.wait_for_start.",
     )
     parser.add_argument(
         "--output_dir",
@@ -253,43 +345,29 @@ def main():
         parser.error("--dataset.repo_id is required unless --dataset.record=false")
     if args.wait_for_start and not args.panel_control:
         parser.error("--eval.wait_for_start needs --eval.panel_control to receive the start command")
+    standby = None
+    if args.standby_policies:
+        try:
+            standby = parse_standby_policies(args.standby_policies)
+        except ValueError as e:
+            parser.error(str(e))
+        if not args.panel_control:
+            parser.error("--eval.standby_policies needs --eval.panel_control to receive start commands")
+        if args.inference_type != "sync":
+            parser.error("--eval.standby_policies supports --inference.type=sync only")
+        args.continuous = True
+        args.wait_for_start = True
+    elif not args.policy_path:
+        parser.error("--policy.path is required (or --eval.standby_policies)")
 
     device = str(auto_select_torch_device())
 
-    # === Policy ===
-    policy_cfg = PreTrainedConfig.from_pretrained(args.policy_path)
-    policy_cfg.pretrained_path = args.policy_path
-    apply_action_overrides(policy_cfg, args.n_action_steps, args.temporal_ensemble_coeff)
-    policy_class = get_policy_class(policy_cfg.type)
-    policy = policy_class.from_pretrained(args.policy_path, config=policy_cfg)
-
-    # === Inference engine config (needs to be set up before .to(device)/.eval(), mirroring
-    # lerobot.rollout.context.build_rollout_context) ===
-    if args.inference_type == "rtc":
-        predict_chunk_params = inspect.signature(policy_class.predict_action_chunk).parameters
-        accepts_rtc_kwargs = {"inference_delay", "prev_chunk_left_over"}.issubset(
-            predict_chunk_params
-        ) or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in predict_chunk_params.values())
-        if not accepts_rtc_kwargs:
-            raise ValueError(
-                f"Policy type '{policy_cfg.type}' does not support RTC inference: "
-                f"predict_action_chunk() has no inference_delay/prev_chunk_left_over/**kwargs. "
-                f"RTC is only supported by VLA-style policies (pi0, pi05, pi0_fast, smolvla, evo1, "
-                f"molmoact2). Use --inference.type=sync instead."
-            )
-        rtc_config = RTCConfig(
-            execution_horizon=args.rtc_execution_horizon,
-            max_guidance_weight=args.rtc_max_guidance_weight,
-        )
-        policy.config.rtc_config = rtc_config
-        if hasattr(policy, "init_rtc_processor"):
-            policy.init_rtc_processor()
-        inference_cfg = RTCInferenceConfig(rtc=rtc_config, queue_threshold=args.rtc_queue_threshold)
-    else:
-        inference_cfg = SyncInferenceConfig()
-
-    policy = policy.to(device)
-    policy.eval()
+    # === Policies (standby mode loads several; each episode runs one of them) ===
+    specs = standby or [
+        {"name": "", "path": args.policy_path, "task": args.task_description, "episode_time_s": None}
+    ]
+    loaded = [(spec, *load_policy(spec["path"], args, device)) for spec in specs]
+    policy_cfg = loaded[0][1]
 
     # === Robot ===
     robot_config = AlohaMiniClientConfig(
@@ -333,28 +411,38 @@ def main():
             image_writer_threads=4,
         )
 
-    # === Policy processors (needs dataset stats) ===
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy_cfg=policy_cfg,
-        pretrained_path=args.policy_path,
-        dataset_stats=dataset.meta.stats if dataset is not None else None,
-        preprocessor_overrides={"device_processor": {"device": device}},
-    )
-
-    # === Inference engine ===
-    engine = create_inference_engine(
-        inference_cfg,
-        policy=policy,
-        preprocessor=preprocessor,
-        postprocessor=postprocessor,
-        robot_wrapper=robot_wrapper,
-        hw_features=hw_features,
-        dataset_features=dataset_features,
-        ordered_action_keys=ordered_action_keys,
-        task=args.task_description,
-        fps=float(args.fps),
-        device=device,
-    )
+    # === Policy processors (need dataset stats) and one inference engine per policy ===
+    policies = {}
+    for spec, cfg, policy, inference_cfg in loaded:
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=cfg,
+            pretrained_path=spec["path"],
+            dataset_stats=dataset.meta.stats if dataset is not None else None,
+            preprocessor_overrides={"device_processor": {"device": device}},
+        )
+        engine = create_inference_engine(
+            inference_cfg,
+            policy=policy,
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
+            robot_wrapper=robot_wrapper,
+            hw_features=hw_features,
+            dataset_features=dataset_features,
+            ordered_action_keys=ordered_action_keys,
+            task=spec["task"],
+            fps=float(args.fps),
+            device=device,
+        )
+        policies[spec["name"]] = {
+            "engine": engine,
+            "task": spec["task"],
+            "episode_time_s": spec["episode_time_s"],
+        }
+    all_engines = [p["engine"] for p in policies.values()]
+    current = specs[0]["name"]
+    engine = policies[current]["engine"]
+    if standby is not None:
+        print(f"[EVAL] Standby: loaded {', '.join(policies)}; waiting for start <name>", flush=True)
 
     # init_rerun(session_name="alohamini_evaluate")
     steps = getattr(policy_cfg, "n_action_steps", None)
@@ -383,7 +471,9 @@ def main():
     control_interval = interpolator.get_control_interval(args.fps)
     recorded = 0
     # Continuous without recording never needs an episode boundary unless the panel ends one.
-    episode_time = math.inf if args.continuous and dataset is None else args.episode_time
+    default_episode_time = (
+        math.inf if args.continuous and dataset is None and standby is None else args.episode_time
+    )
     safety_guard = EvaluationSafetyGuard()
     engage_ramp = EngageRamp(max_step=args.engage_ramp_speed / (args.fps * args.interpolation_multiplier))
     control = PanelControl(sys.stdin if args.panel_control else None)
@@ -397,23 +487,37 @@ def main():
         if args.panel_control:
             emit(name, total=total, **outcomes.counts(), **fields)
 
-    def reset_environment(next_episode: int) -> None:
-        """Wait for manual scene reset (timed, or until the panel says start) while draining observations."""
+    def reset_environment(next_episode: int) -> str:
+        """Wait for manual scene reset (timed, or until the panel says start) while draining observations.
+
+        Returns the policy for the next episode: in standby mode the one named by "start <name>".
+        """
+        selected = current
         if args.reset_time == 0 and not args.wait_for_start:
-            return
+            return selected
 
         deadline = None if args.wait_for_start else time.monotonic() + args.reset_time
         label = f"{next_episode}/{total}" if total else f"{next_episode}"
         event(
-            "waiting", episode=next_episode, until=None if deadline is None else time.time() + args.reset_time
+            "waiting",
+            episode=next_episode,
+            until=None if deadline is None else time.time() + args.reset_time,
+            **({"policies": list(policies)} if standby is not None else {}),
         )
         if deadline is None:
             print(f"[RESET] Prepare evaluation episode {label}, then press Start in the panel", flush=True)
         last_remaining = None
         while True:
             command = control.poll()
-            if command == "start":
-                break
+            if command and command.split()[0] == "start":
+                name = command.partition(" ")[2]
+                if standby is None:
+                    break
+                if name in policies or (not name and len(policies) == 1):
+                    selected = name or current
+                    break
+                print(f"[EVAL] Ignoring {command!r}: choose one of {', '.join(policies)}", flush=True)
+                continue
             if command in ("success", "fail") and outcomes.relabel(command):
                 print(f"[EVAL] Episode {outcomes.counts()['done']} marked {command}", flush=True)
                 event("outcome", episode=outcomes.counts()["done"], outcome=command)
@@ -441,9 +545,19 @@ def main():
                 precise_sleep(sleep_t)
         if deadline is not None:
             print(flush=True)
+        return selected
 
     try:
         while args.continuous or recorded < args.num_episodes:
+            if standby is not None:
+                chosen = reset_environment(recorded + 1)
+                if policies[chosen]["engine"] is not engine:
+                    stop_inference(engine)
+                current = chosen
+                engine = policies[current]["engine"]
+                print(f"[EVAL] Running {current}", flush=True)
+            task = policies[current]["task"]
+            episode_time = policies[current]["episode_time_s"] or default_episode_time
             log_say(f"Eval episode {recorded + 1}" + (f" of {total}" if total else ""))
             stop_inference(engine)
             engine.reset()
@@ -456,7 +570,10 @@ def main():
             episode_frames = 0
             ended_by = "timeout"
             event(
-                "episode_start", episode=recorded + 1, cap=None if math.isinf(episode_time) else episode_time
+                "episode_start",
+                episode=recorded + 1,
+                cap=None if math.isinf(episode_time) else episode_time,
+                **({"policy": current} if standby is not None else {}),
             )
 
             while (time.perf_counter() - start) < episode_time:
@@ -523,7 +640,7 @@ def main():
                     sent = robot.send_action(robot_action_processor((action_dict, obs_raw)))
                     if sent and robot.observation_updated and dataset is not None:
                         action_frame = build_dataset_frame(dataset_features, action_dict, prefix=ACTION)
-                        dataset.add_frame({**obs_frame, **action_frame, "task": args.task_description})
+                        dataset.add_frame({**obs_frame, **action_frame, "task": task})
                         episode_frames += 1
 
                 dt = time.perf_counter() - loop_start
@@ -558,7 +675,8 @@ def main():
                       duration_s=round(duration, 1), saved=dataset_index is not None)  # fmt: skip
             more = args.continuous or recorded < args.num_episodes
             # Continuous runs go back to back unless the operator wants to set up each episode.
-            if more and (args.wait_for_start or not args.continuous):
+            # (Standby waits at the top of the loop, where the next policy is chosen.)
+            if more and standby is None and (args.wait_for_start or not args.continuous):
                 reset_environment(recorded + 1)
     finally:
         # A second Ctrl+C from the panel's stop escalation must not cut the hold/save below short.
@@ -569,7 +687,7 @@ def main():
                 robot.send_action(hold_action(robot.last_remote_state))
             finally:
                 try:
-                    engine.stop()
+                    stop_all(all_engines)
                 finally:
                     try:
                         if dataset is not None and dataset.has_pending_frames():

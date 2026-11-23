@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 
 from examples.alohamini import eval_control, evaluate_bi
@@ -134,3 +135,117 @@ def test_panel_commands_end_discard_judge_and_start_episodes(monkeypatch, tmp_pa
     ]  # fmt: skip
     assert events[1]["done"] == 0 and events[-1]["done"] == 2 and events[-1]["fail"] == 1
     assert events[2]["until"] is None and events[0]["cap"] == 1
+
+
+def test_parse_command_accepts_start_with_policy_only():
+    assert eval_control.parse_command(" START  Tiramisu ") == "start tiramisu"
+    assert eval_control.parse_command("start") == "start"
+    assert eval_control.parse_command("end tiramisu") is None
+    assert eval_control.parse_command("start ../etc") is None
+    assert eval_control.parse_command("start a b") is None
+
+
+class StandbyControl(ScriptedControl):
+    """Like ScriptedControl, but ends the (endless) standby run once the script is used up."""
+
+    def poll(self):
+        if not self.queue:
+            raise KeyboardInterrupt
+        return self.queue.pop(0)
+
+
+def test_standby_loads_all_policies_and_runs_the_one_each_start_names(monkeypatch, tmp_path, capsys):
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(evaluate_bi.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(evaluate_bi.time, "perf_counter", lambda: clock.now)
+    monkeypatch.setattr(evaluate_bi, "precise_sleep", lambda s: setattr(clock, "now", clock.now + s))
+
+    robot = Mock(observation_updated=True, last_remote_state={"joint.pos": 1.0})
+    robot.name = "alohamini"
+    robot.observation_features = {"joint.pos": float}
+    robot.action_features = {"joint.pos": float}
+    robot.get_observation.return_value = {"joint.pos": 1.0}
+    robot.send_action.return_value = True
+    engines, loaded = {}, []
+
+    def make_engine(*_a, task, **_kw):
+        engine = Mock(_rtc_thread=None)
+        engine.get_action.return_value = torch.tensor([2.0 if "cake" in task else 3.0])
+        engines[task] = engine
+        return engine
+
+    guard = Mock(context=(None,))
+    guard.check_observation.side_effect = lambda _robot, obs, **_kw: (obs, None)
+    monkeypatch.setattr(evaluate_bi, "AlohaMiniClient", lambda _config: robot)
+    monkeypatch.setattr(evaluate_bi, "ThreadSafeRobot", lambda r: r)
+    monkeypatch.setattr(evaluate_bi, "EvaluationSafetyGuard", lambda: guard)
+    monkeypatch.setattr(evaluate_bi, "EngageRamp", lambda **_kw: Mock(apply=lambda action, _obs: action))
+    monkeypatch.setattr(evaluate_bi, "auto_select_torch_device", lambda: "cpu")
+    monkeypatch.setattr(
+        evaluate_bi.PreTrainedConfig,
+        "from_pretrained",
+        lambda p: loaded.append(p) or SimpleNamespace(type="act"),
+    )
+    monkeypatch.setattr(evaluate_bi, "get_policy_class", lambda _type: Mock())
+    monkeypatch.setattr(
+        evaluate_bi, "make_default_processors", lambda: (lambda p: p[0], lambda p: p[0], lambda o: o)
+    )
+    monkeypatch.setattr(evaluate_bi, "aggregate_pipeline_dataset_features", lambda **_kw: {})
+    monkeypatch.setattr(evaluate_bi, "hw_to_dataset_features", lambda *_a: {})
+    monkeypatch.setattr(evaluate_bi, "build_dataset_frame", lambda _f, data, prefix: {prefix: dict(data)})
+    monkeypatch.setattr(evaluate_bi, "make_pre_post_processors", lambda **_kw: (None, None))
+    monkeypatch.setattr(evaluate_bi, "create_inference_engine", make_engine)
+    monkeypatch.setattr(evaluate_bi, "log_say", lambda *_a: None)
+    StandbyControl.script = [
+        None, "start nope", None,  # unknown names are ignored; it keeps waiting
+        "start tiramisu",  # runs to tiramisu's own 1 s limit (the loop polls every tick)
+        *[None] * 40,
+        "start strawberry_cake", None, "end",  # ended early by the panel
+        None,
+    ]  # fmt: skip
+    monkeypatch.setattr(evaluate_bi, "PanelControl", StandbyControl)
+    policies = [
+        {"name": "strawberry_cake", "path": "ckpt/straw", "task": "pick the cake", "episode_time_s": 30},
+        {"name": "tiramisu", "path": "ckpt/tira", "task": "pick the tiramisu", "episode_time_s": 1},
+    ]
+    monkeypatch.setattr(
+        "sys.argv",
+        ["evaluate_bi", f"--eval.standby_policies={json.dumps(policies)}", "--dataset.record=false",
+         "--eval.panel_control=true", f"--output_dir={tmp_path}"],
+    )  # fmt: skip
+
+    with pytest.raises(KeyboardInterrupt):
+        evaluate_bi.main()
+
+    assert loaded == ["ckpt/straw", "ckpt/tira"]  # both loaded up front, once
+    sent = [
+        call.args[0]["joint.pos"] for call in robot.send_action.call_args_list if "joint.pos" in call.args[0]
+    ]
+    assert 3.0 in sent and 2.0 in sent and sent.index(3.0) < sent.index(2.0)  # tiramisu first, then cake
+    for engine in engines.values():
+        engine.stop.assert_called()  # unloaded when stopped
+    robot.disconnect.assert_called_once()
+    events = [
+        json.loads(line.removeprefix(eval_control.EVENT_PREFIX))
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(eval_control.EVENT_PREFIX)
+    ]
+    assert [(e["event"], e.get("policy")) for e in events] == [
+        ("waiting", None), ("episode_start", "tiramisu"), ("episode_end", None),
+        ("waiting", None), ("episode_start", "strawberry_cake"), ("episode_end", None), ("waiting", None),
+    ]  # fmt: skip
+    assert events[0]["policies"] == ["strawberry_cake", "tiramisu"]
+    assert events[1]["cap"] == 1 and events[4]["cap"] == 30
+
+
+def test_standby_requires_panel_control_and_valid_policies(monkeypatch, capsys):
+    for argv, message in [
+        (['--eval.standby_policies=[{"name": "a", "path": "p"}]'], "panel_control"),
+        (["--eval.standby_policies=[]", "--eval.panel_control=true"], "non-empty"),
+        (['--eval.standby_policies=[{"name": "A B", "path": "p"}]', "--eval.panel_control=true"], "unique"),
+        (["--dataset.record=false"], "--policy.path is required"),
+    ]:
+        monkeypatch.setattr("sys.argv", ["evaluate_bi", "--dataset.record=false", *argv])
+        with pytest.raises(SystemExit):
+            evaluate_bi.main()
+        assert message in capsys.readouterr().err

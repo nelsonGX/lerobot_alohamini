@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -258,56 +259,194 @@ def test_simulated_pick_updates_inventory_and_reacts(env):
         asyncio.run(session.tool_pick_item("tiramisu"))
 
 
-def test_real_pick_starts_gpu_job_and_follows_it(env):
+class FakeGPU:
+    """A GPU agent: jobs, their [EVAL:event] lines, and the commands sent to them."""
+
+    def __init__(self, standby_supported=True):
+        self.standby_supported = standby_supported
+        self.jobs = {}
+        self.commands = []
+
+    def line(self, job, event, **fields):
+        job["at"] += 1
+        job["lines"].append("[EVAL:event] " + json.dumps({"event": event, "at": job["at"], **fields}))
+
+    def start_job(self, req):
+        if req.standby_policies and not self.standby_supported:
+            raise HTTPException(422, [{"msg": "Extra inputs are not permitted"}])
+        if any(j["state"] == "running" for j in self.jobs.values()):
+            raise HTTPException(409, "A GPU job is already running.")
+        job_id = f"{len(self.jobs) + 1:032x}"
+        self.jobs[job_id] = {
+            "id": job_id,
+            "name": req.name,
+            "kind": req.kind,
+            "request": req.model_dump(),
+            "state": "running",
+            "lines": [],
+            "started_at": 100.0,
+            "at": 100.0,
+            "polls": 0,
+        }
+        return {"id": job_id}
+
+    def call(self, method, path, body=None):
+        if path == "/status":
+            return {"jobs": [{k: j[k] for k in ("id", "name", "kind", "state")} for j in self.jobs.values()]}
+        job = self.jobs[path.split("/")[2]]
+        if path.endswith("/stop"):
+            job["state"] = "stopped"
+            return {"ok": True}
+        if path.endswith("/command"):
+            self.commands.append((job["id"], body))
+            if body["command"] == "start":
+                job["pending"] = body["policy"]
+            elif body["command"] == "end" and job.get("running"):
+                job["running"] = None
+                self.line(job, "episode_end", episode=1)
+                self.line(job, "waiting", episode=2)
+            return {"ok": True}
+        job["polls"] += 1
+        standby = bool(job["request"]["standby_policies"])
+        if standby and job["polls"] == 2:  # loaded and connected
+            self.line(job, "waiting", episode=1)
+        if job.get("pending") and job["polls"] >= 2:
+            job["running"], job["pending"] = job["pending"], None
+            self.line(job, "episode_start", episode=1, policy=job["running"])
+        elif job.get("running") and job["polls"] % 3 == 0:  # runs a few polls, then hits its time limit
+            job["running"] = None
+            self.line(job, "episode_end", episode=1)
+            self.line(job, "waiting", episode=2)
+        if not standby:
+            if job["polls"] == 2:
+                self.line(job, "episode_start", episode=1)
+            if job["polls"] >= 4:
+                job["state"] = "succeeded"
+        return {**job, "request": job["request"]}
+
+
+def arm_with_checkpoints(armed=True):
+    def change(c):
+        c.armed = armed
+        c.items[0].checkpoint = "outputs/straw/last"
+        c.items[1].checkpoint = "outputs/tira/last"
+
+    return kiosk.store.update(change)
+
+
+def test_arming_warms_up_and_picks_use_the_loaded_policy(env):
     session, client = env
-    kiosk.store.update(
-        lambda c: setattr(c, "armed", True) or setattr(c.items[0], "checkpoint", "outputs/straw/last")
-    )
-    started, polls = [], []
-
-    def start_job(req):
-        started.append(req)
-        return {"id": "a" * 32}
-
-    def gpu_call(method, path, body=None):
-        polls.append((method, path))
-        if len(polls) < 3:
-            return {"state": "running", "lines": ['[EVAL:event] {"event": "episode_start", "at": 1.0}']}
-        return {"state": "succeeded", "lines": []}
-
-    kiosk.configure(camera_feed=None, camera_port=5557, start_job=start_job, gpu_call=gpu_call)
+    gpu = FakeGPU()
+    kiosk.configure(camera_feed=None, camera_port=5557, start_job=gpu.start_job, gpu_call=gpu.call)
     session._client = FakeClaude(
         [FakeStream(text_events("好了。"), message([text_block("好了。")], "end_turn"))]
     )
 
     async def run():
-        result = await session.tool_pick_item("strawberry_cake")
+        await session.config_changed(arm_with_checkpoints())
+        for _ in range(100):
+            if session.standby.state == "ready":
+                break
+            await asyncio.sleep(0.01)
+        assert session.standby.state == "ready"
+        result = await session.tool_pick_item("tiramisu")
         assert "Started" in result
+        await settle(session)
+        for _ in range(100):
+            if (
+                session.pick_task
+                and session.pick_task.done()
+                and session.turn_task
+                and session.turn_task.done()
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    (job,) = gpu.jobs.values()  # one warm job served the pick
+    assert job["name"] == "kiosk-standby" and job["state"] == "running"
+    assert [p["name"] for p in job["request"]["standby_policies"]] == ["strawberry_cake", "tiramisu"]
+    assert gpu.commands == [(job["id"], {"command": "start", "policy": "tiramisu"})]
+    assert session.pick.mode == "standby" and session.pick.state == "succeeded"
+    assert next(i for i in kiosk.store.load().items if i.id == "tiramisu").sold == 1
+    assert session.standby.state == "ready"  # still warm for the next customer
+    assert client.of("robot_event")
+    assert any(e["standby"]["state"] == "loading" for e in client.of("standby"))
+
+
+def test_disarm_and_stop_unload_the_warm_job(env):
+    session, client = env
+    gpu = FakeGPU()
+    kiosk.configure(camera_feed=None, camera_port=5557, start_job=gpu.start_job, gpu_call=gpu.call)
+
+    async def run():
+        await session.config_changed(arm_with_checkpoints())
+        (job,) = gpu.jobs.values()
+        await session.config_changed(arm_with_checkpoints(armed=False))
+        assert job["state"] == "stopped"
+        await asyncio.sleep(0.05)
+        assert session.standby.state == "off"
+        # Re-arm, start a pick, then STOP: job stopped, pick stopped, arm disarmed.
+        await session.config_changed(arm_with_checkpoints())
+        await session.tool_pick_item("strawberry_cake")
+        await session.stop_pick()
+        await settle(session)
+        await asyncio.sleep(0.05)
+
+    session._client = FakeClaude(
+        [FakeStream(text_events("停了。"), message([text_block("停了。")], "end_turn"))]
+    )
+    asyncio.run(run())
+    assert all(j["state"] == "stopped" for j in gpu.jobs.values())
+    assert not kiosk.store.load().armed
+    assert session.pick.state == "stopped"
+    assert session.standby.state == "off"
+    assert any("disarmed" in n["message"] for n in client.of("notification"))
+
+
+def test_old_gpu_agent_falls_back_to_one_job_per_pick(env):
+    session, _ = env
+    gpu = FakeGPU(standby_supported=False)
+    kiosk.configure(camera_feed=None, camera_port=5557, start_job=gpu.start_job, gpu_call=gpu.call)
+    session._client = FakeClaude(
+        [FakeStream(text_events("好了。"), message([text_block("好了。")], "end_turn"))]
+    )
+
+    async def run():
+        await session.config_changed(arm_with_checkpoints())
+        assert session.standby.state == "error" and "warm up" in session.standby.detail
+        await session.tool_pick_item("strawberry_cake")
         await settle(session)
         await settle(session)
 
     asyncio.run(run())
-    req = started[0]
-    assert (req.kind, req.episodes, req.record, req.checkpoint) == (
-        "robot_eval",
-        1,
-        False,
-        "outputs/straw/last",
-    )
-    assert session.pick.state == "succeeded" and session.pick.episode_started_at == 1.0
+    (job,) = gpu.jobs.values()
+    req = job["request"]
+    assert (req["episodes"], req["record"], req["checkpoint"]) == (1, False, "outputs/straw/last")
+    assert session.pick.mode == "job" and session.pick.state == "succeeded"
     item = kiosk.store.load().items[0]
     assert item.sold == 1 and item.back_stock == 3
-    assert any("Restock" in n["message"] for n in client.of("notification"))
+
+
+def test_panel_restart_adopts_the_running_warm_job(env):
+    session, _ = env
+    gpu = FakeGPU()
+    kiosk.configure(camera_feed=None, camera_port=5557, start_job=gpu.start_job, gpu_call=gpu.call)
+    cfg = arm_with_checkpoints()
+    gpu.start_job(kiosk.standby_request(kiosk.standby_policies(cfg)))  # left over from before the restart
+    asyncio.run(session.ensure_standby(cfg))
+    assert len(gpu.jobs) == 1 and session.standby.job_id == next(iter(gpu.jobs))
 
 
 def test_pick_start_failure_is_reported_to_claude(env):
     session, _ = env
-    kiosk.store.update(lambda c: setattr(c, "armed", True) or setattr(c.items[0], "checkpoint", "x"))
+    arm_with_checkpoints()
 
     def start_job(req):
         raise HTTPException(409, "Start the robot host on the Robot page before live evaluation.")
 
-    kiosk.configure(camera_feed=None, camera_port=5557, start_job=start_job, gpu_call=None)
+    kiosk.configure(camera_feed=None, camera_port=5557, start_job=start_job, gpu_call=FakeGPU().call)
     with pytest.raises(kiosk.ToolError, match="robot host"):
         asyncio.run(session.tool_pick_item("strawberry_cake"))
     assert session.pick is None
+    assert "robot host" in session.standby.detail

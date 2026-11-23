@@ -267,4 +267,4 @@ def stop(job_id: str) -> dict:
 
 @app.post("/jobs/{job_id}/command")
 def episode_command(job_id: str, req: EpisodeCommand) -> dict:
-    return manager().send(job_id, req.command)
+    return manager().send(job_id, req.line())

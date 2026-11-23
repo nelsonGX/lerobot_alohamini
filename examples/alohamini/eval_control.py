@@ -6,14 +6,26 @@ The panel writes one command per line to the program's terminal and reads progre
 
 import json
 import queue
+import re
 import threading
 import time
 from pathlib import Path
 
 EVENT_PREFIX = "[EVAL:event] "
 # success/fail/end finish the running episode (with or without a verdict); during the wait
-# between episodes success/fail relabel the last one and start begins the next one now.
+# between episodes success/fail relabel the last one and start begins the next one now
+# ("start <policy>" in standby mode also chooses which loaded policy runs it).
 COMMANDS = ("success", "fail", "end", "discard", "start")
+
+
+def parse_command(line: str) -> str | None:
+    """A known command, or "start <policy>" (standby mode picks the policy for the next episode)."""
+    parts = line.strip().lower().split()
+    if len(parts) == 1 and parts[0] in COMMANDS:
+        return parts[0]
+    if len(parts) == 2 and parts[0] == "start" and re.fullmatch(r"[a-z0-9_]{1,40}", parts[1]):
+        return f"start {parts[1]}"
+    return None
 
 
 class PanelControl:
@@ -25,8 +37,7 @@ class PanelControl:
 
     def _read(self, stream) -> None:
         for line in stream:
-            command = line.strip().lower()
-            if command in COMMANDS:
+            if command := parse_command(line):
                 self._queue.put(command)
 
     def poll(self) -> str | None:
