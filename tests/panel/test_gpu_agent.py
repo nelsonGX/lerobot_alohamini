@@ -106,7 +106,21 @@ def test_smolvla_base_training_maps_alohamini_cameras(tmp_path):
     }
 
 
-@pytest.mark.parametrize("checkpoint", ["", "team/custom_smolvla", "lerobot/pi0_base", "lerobot/pi05_base"])
+@pytest.mark.parametrize("checkpoint", ["lerobot/pi0_base", "lerobot/pi05_base"])
+def test_pi_base_training_maps_cameras_and_fits_memory(tmp_path, checkpoint):
+    req = gpu_jobs.JobRequest(kind="train", dataset="alohamini/cake", policy="act", checkpoint=checkpoint)
+    cmd = gpu_jobs.command(req, tmp_path)
+    rename_args = [arg for arg in cmd if arg.startswith("--rename_map=")]
+    assert len(rename_args) == 1
+    assert json.loads(rename_args[0].split("=", 1)[1]) == {
+        "observation.images.overhead": "observation.images.base_0_rgb",
+        "observation.images.chest": "observation.images.left_wrist_0_rgb",
+    }
+    assert "--policy.dtype=bfloat16" in cmd
+    assert "--policy.gradient_checkpointing=true" in cmd
+
+
+@pytest.mark.parametrize("checkpoint", ["", "team/custom_smolvla", "team/custom_pi05"])
 def test_other_training_configs_keep_their_camera_names(tmp_path, checkpoint):
     req = gpu_jobs.JobRequest(kind="train", dataset="team/data", policy="smolvla", checkpoint=checkpoint)
     assert not any(arg.startswith("--rename_map=") for arg in gpu_jobs.command(req, tmp_path))

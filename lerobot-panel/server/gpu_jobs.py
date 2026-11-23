@@ -172,6 +172,16 @@ def command(req: JobRequest, output: Path) -> list[str]:
                 "observation.images.chest": "observation.images.camera2",
             }
             cmd.append(f"--rename_map={json.dumps(rename_map)}")
+        elif req.checkpoint in ("lerobot/pi0_base", "lerobot/pi05_base"):
+            # OpenPI base models expect base/left-wrist/right-wrist cameras. The unused
+            # right-wrist slot is padded by the model, so two recording cameras are enough.
+            rename_map = {
+                "observation.images.overhead": "observation.images.base_0_rgb",
+                "observation.images.chest": "observation.images.left_wrist_0_rgb",
+            }
+            cmd.append(f"--rename_map={json.dumps(rename_map)}")
+            # ~3B params: float32 weights + AdamW state alone exceed a 48 GB GPU.
+            cmd += ["--policy.dtype=bfloat16", "--policy.gradient_checkpointing=true"]
         return cmd + chunk_args(req)
     if req.kind == "sim_eval":
         return [
@@ -188,8 +198,6 @@ def command(req: JobRequest, output: Path) -> list[str]:
             *chunk_args(req),
         ]
     if req.standby_policies:
-        import json
-
         policies = [
             {"name": p.name, "path": p.checkpoint, "task": p.task, "episode_time_s": p.episode_time_s}
             for p in req.standby_policies
