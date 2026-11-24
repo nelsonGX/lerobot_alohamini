@@ -35,10 +35,10 @@ from lerobot.utils.utils import log_say
 
 try:
     from .eval_control import EvalOutcomes, PanelControl, emit
-    from .evaluation_safety import EngageRamp, EvaluationSafetyGuard, hold_action, stop_inference
+    from .evaluation_safety import EngageRamp, EvaluationSafetyGuard, HomeMove, hold_action, stop_inference
 except ImportError:
     from eval_control import EvalOutcomes, PanelControl, emit
-    from evaluation_safety import EngageRamp, EvaluationSafetyGuard, hold_action, stop_inference
+    from evaluation_safety import EngageRamp, EvaluationSafetyGuard, HomeMove, hold_action, stop_inference
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -95,6 +95,7 @@ def apply_action_overrides(
     policy_cfg.n_action_steps = n_action_steps
 
 
+HOME_TIMEOUT_S = 20.0
 STANDBY_NAME = re.compile(r"^[a-z0-9_]{1,40}$")
 
 
@@ -487,6 +488,16 @@ def main():
         if args.panel_control:
             emit(name, total=total, **outcomes.counts(), **fields)
 
+    # Standby: the pose the arms were in when the job started (staff arm the robot with the arms at rest).
+    # "home" brings them back there, e.g. so the shop assistant can retry a failed pick.
+    home_pose = None
+    if standby is not None:
+        home_pose = {k: float(v) for k, v in robot.get_observation().items() if k.endswith(".pos")}
+        print(f"[EVAL] Home pose saved ({len(home_pose)} joints)", flush=True)
+    home_step = (args.engage_ramp_speed if args.engage_ramp_speed > 0 else 30.0) / (
+        args.fps * args.interpolation_multiplier
+    )
+
     def reset_environment(next_episode: int) -> str:
         """Wait for manual scene reset (timed, or until the panel says start) while draining observations.
 
@@ -507,8 +518,19 @@ def main():
         if deadline is None:
             print(f"[RESET] Prepare evaluation episode {label}, then press Start in the panel", flush=True)
         last_remaining = None
+        homing = None
+        home_deadline = 0.0
+        home_reported = False
         while True:
             command = control.poll()
+            if command == "home":
+                if home_pose:
+                    homing, home_reported = HomeMove(home_pose, home_step), False
+                    home_deadline = time.monotonic() + HOME_TIMEOUT_S
+                    print("[EVAL] Moving the arms home", flush=True)
+                    event("homing")
+                else:
+                    print("[EVAL] Ignoring 'home': no home pose (standby mode only)", flush=True)
             if command and command.split()[0] == "start":
                 name = command.partition(" ")[2]
                 if standby is None:
@@ -535,7 +557,33 @@ def main():
 
             # Keep consuming observations during reset so the next episode starts
             # from a fresh remote frame rather than one cached before the reset.
-            robot.get_observation()
+            observation = robot.get_observation()
+            if homing is not None:
+                observation, reason = safety_guard.check_observation(robot, observation)
+                if reason:
+                    homing = None
+                    print(f"[EVAL] Homing stopped: {reason}", flush=True)
+                    event("homed", ok=False, reason=reason)
+                else:
+                    robot.send_action(homing.step(observation))
+                    if not home_reported and homing.arrived(observation):
+                        home_reported = True
+                        print("[EVAL] Arms are home", flush=True)
+                        event("homed", ok=True, error=round(homing.error(observation), 1))
+                    elif not home_reported and time.monotonic() > home_deadline:
+                        error = round(homing.error(observation), 1)
+                        homing = None
+                        robot.send_action(hold_action(observation))
+                        print(
+                            f"[EVAL] Arms did not get home in {HOME_TIMEOUT_S:.0f} s (off by {error})",
+                            flush=True,
+                        )
+                        event(
+                            "homed",
+                            ok=False,
+                            reason=f"did not get home in {HOME_TIMEOUT_S:.0f} s",
+                            error=error,
+                        )
             sleep_t = (
                 control_interval
                 if deadline is None

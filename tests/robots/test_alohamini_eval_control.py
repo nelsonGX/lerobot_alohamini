@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from examples.alohamini import eval_control, evaluate_bi
+from examples.alohamini import eval_control, evaluate_bi, evaluation_safety
 
 
 def test_panel_control_reads_known_commands_only():
@@ -154,18 +154,12 @@ class StandbyControl(ScriptedControl):
         return self.queue.pop(0)
 
 
-def test_standby_loads_all_policies_and_runs_the_one_each_start_names(monkeypatch, tmp_path, capsys):
+def standby_harness(monkeypatch, tmp_path, robot, script):
+    """Run evaluate_bi in standby mode with two fake policies until ``script`` (control commands) runs out."""
     clock = SimpleNamespace(now=10.0)
     monkeypatch.setattr(evaluate_bi.time, "monotonic", lambda: clock.now)
     monkeypatch.setattr(evaluate_bi.time, "perf_counter", lambda: clock.now)
     monkeypatch.setattr(evaluate_bi, "precise_sleep", lambda s: setattr(clock, "now", clock.now + s))
-
-    robot = Mock(observation_updated=True, last_remote_state={"joint.pos": 1.0})
-    robot.name = "alohamini"
-    robot.observation_features = {"joint.pos": float}
-    robot.action_features = {"joint.pos": float}
-    robot.get_observation.return_value = {"joint.pos": 1.0}
-    robot.send_action.return_value = True
     engines, loaded = {}, []
 
     def make_engine(*_a, task, **_kw):
@@ -196,13 +190,7 @@ def test_standby_loads_all_policies_and_runs_the_one_each_start_names(monkeypatc
     monkeypatch.setattr(evaluate_bi, "make_pre_post_processors", lambda **_kw: (None, None))
     monkeypatch.setattr(evaluate_bi, "create_inference_engine", make_engine)
     monkeypatch.setattr(evaluate_bi, "log_say", lambda *_a: None)
-    StandbyControl.script = [
-        None, "start nope", None,  # unknown names are ignored; it keeps waiting
-        "start tiramisu",  # runs to tiramisu's own 1 s limit (the loop polls every tick)
-        *[None] * 40,
-        "start strawberry_cake", None, "end",  # ended early by the panel
-        None,
-    ]  # fmt: skip
+    StandbyControl.script = script
     monkeypatch.setattr(evaluate_bi, "PanelControl", StandbyControl)
     policies = [
         {"name": "strawberry_cake", "path": "ckpt/straw", "task": "pick the cake", "episode_time_s": 30},
@@ -213,9 +201,33 @@ def test_standby_loads_all_policies_and_runs_the_one_each_start_names(monkeypatc
         ["evaluate_bi", f"--eval.standby_policies={json.dumps(policies)}", "--dataset.record=false",
          "--eval.panel_control=true", f"--output_dir={tmp_path}"],
     )  # fmt: skip
-
     with pytest.raises(KeyboardInterrupt):
         evaluate_bi.main()
+    return engines, loaded
+
+
+def eval_events(capsys):
+    return [
+        json.loads(line.removeprefix(eval_control.EVENT_PREFIX))
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(eval_control.EVENT_PREFIX)
+    ]
+
+
+def test_standby_loads_all_policies_and_runs_the_one_each_start_names(monkeypatch, tmp_path, capsys):
+    robot = Mock(observation_updated=True, last_remote_state={"joint.pos": 1.0})
+    robot.name = "alohamini"
+    robot.observation_features = {"joint.pos": float}
+    robot.action_features = {"joint.pos": float}
+    robot.get_observation.return_value = {"joint.pos": 1.0}
+    robot.send_action.return_value = True
+    engines, loaded = standby_harness(monkeypatch, tmp_path, robot, [
+        None, "start nope", None,  # unknown names are ignored; it keeps waiting
+        "start tiramisu",  # runs to tiramisu's own 1 s limit (the loop polls every tick)
+        *[None] * 40,
+        "start strawberry_cake", None, "end",  # ended early by the panel
+        None,
+    ])  # fmt: skip
 
     assert loaded == ["ckpt/straw", "ckpt/tira"]  # both loaded up front, once
     sent = [
@@ -225,11 +237,7 @@ def test_standby_loads_all_policies_and_runs_the_one_each_start_names(monkeypatc
     for engine in engines.values():
         engine.stop.assert_called()  # unloaded when stopped
     robot.disconnect.assert_called_once()
-    events = [
-        json.loads(line.removeprefix(eval_control.EVENT_PREFIX))
-        for line in capsys.readouterr().out.splitlines()
-        if line.startswith(eval_control.EVENT_PREFIX)
-    ]
+    events = eval_events(capsys)
     assert [(e["event"], e.get("policy")) for e in events] == [
         ("waiting", None), ("episode_start", "tiramisu"), ("episode_end", None),
         ("waiting", None), ("episode_start", "strawberry_cake"), ("episode_end", None), ("waiting", None),
@@ -249,3 +257,49 @@ def test_standby_requires_panel_control_and_valid_policies(monkeypatch, capsys):
         with pytest.raises(SystemExit):
             evaluate_bi.main()
         assert message in capsys.readouterr().err
+
+
+def test_home_moves_the_arms_back_to_where_they_started(monkeypatch, tmp_path, capsys):
+    state = {"joint.pos": 0.0, "gripper.pos": 5.0}  # the pose when staff armed the robot
+
+    def follow(action):  # a perfect follower arm
+        state.update({k: v for k, v in action.items() if k in state})
+        return True
+
+    robot = Mock(observation_updated=True, last_remote_state=state)
+    robot.name = "alohamini"
+    robot.observation_features = {"joint.pos": float, "gripper.pos": float}
+    robot.action_features = {"joint.pos": float}
+    robot.get_observation.side_effect = lambda: dict(state)
+    robot.send_action.side_effect = follow
+    standby_harness(monkeypatch, tmp_path, robot, [
+        "start tiramisu", *[None] * 40,  # the policy leaves the arm at 3.0
+        "home", *[None] * 30,
+        None,
+    ])  # fmt: skip
+
+    events = eval_events(capsys)
+    assert [e["event"] for e in events] == [
+        "waiting", "episode_start", "episode_end", "waiting", "homing", "homed",
+    ]  # fmt: skip
+    assert events[-1]["ok"] is True and state["joint.pos"] == 0.0
+    homing = [c.args[0] for c in robot.send_action.call_args_list if "x.vel" in c.args[0]][
+        :-1
+    ]  # last: exit hold
+    steps = [b["joint.pos"] - a["joint.pos"] for a, b in zip(homing, homing[1:], strict=False)]
+    assert homing and max(abs(d) for d in steps) <= 1.0 + 1e-9  # slewed, not jumped
+    assert all(a["x.vel"] == 0.0 and a["gripper.pos"] == 5.0 for a in homing)
+
+
+def test_home_move_slews_holds_and_reports_arrival():
+    move = evaluation_safety.HomeMove({"a.pos": 0.0, "b.pos": 10.0}, max_step=2.0, tolerance=0.5)
+    obs = {"a.pos": 5.0, "b.pos": 10.0, "lift_axis.height_mm": 120.0}
+    first = move.step(obs)
+    assert first["a.pos"] == 3.0 and first["b.pos"] == 10.0
+    assert first["lift_axis.height_mm"] == 120.0 and first["theta.vel"] == 0.0
+    assert not move.arrived(obs) and move.error(obs) == 5.0
+    for _ in range(3):
+        move.step(obs)
+    assert move.step(obs)["a.pos"] == 0.0
+    assert not move.arrived(obs)  # commanded home, but the arm hasn't followed yet
+    assert move.arrived({"a.pos": 0.3, "b.pos": 10.0})

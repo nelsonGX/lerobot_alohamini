@@ -19,7 +19,8 @@ class EpisodeCommand(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    command: Literal["success", "fail", "end", "discard", "start"]
+    # "home": standby jobs move the arms back to the pose they had when the job started.
+    command: Literal["success", "fail", "end", "discard", "start", "home"]
     # Standby jobs: which loaded policy runs the episode that "start" begins.
     policy: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,40}$")
 

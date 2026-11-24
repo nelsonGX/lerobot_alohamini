@@ -110,3 +110,40 @@ class EngageRamp:
         if caught_up:
             self._last = {}
         return ramped
+
+
+class HomeMove:
+    """Bring the arms back to a saved pose (e.g. after a failed pick, so the policy can try again).
+
+    Every ``.pos`` target slews from the observed pose towards ``home`` at most ``max_step`` per tick, which
+    also opens the Host engage gate like :class:`EngageRamp`. The base stays still and the lift where it is.
+    Once there it keeps commanding the home pose, so the arms hold it until the next episode.
+    """
+
+    def __init__(self, home: dict[str, float], max_step: float, tolerance: float = 3.0):
+        self.home = dict(home)
+        self.max_step = max_step
+        self.tolerance = tolerance
+        self._target: dict[str, float] | None = None
+
+    def step(self, observation) -> dict:
+        if self._target is None:
+            self._target = {k: float(observation[k]) for k in self.home if k in observation}
+        for key, current in self._target.items():
+            delta = self.home[key] - current
+            if self.max_step > 0 and abs(delta) > self.max_step:
+                delta = self.max_step if delta > 0 else -self.max_step
+            self._target[key] = current + delta
+        action = hold_action(observation)
+        action.update(self._target)
+        return action
+
+    def error(self, observation) -> float:
+        """Largest distance (joint units) between the arms and the home pose."""
+        return max(
+            (abs(float(observation[k]) - v) for k, v in self.home.items() if k in observation), default=0.0
+        )
+
+    def arrived(self, observation) -> bool:
+        commanded = self._target is not None and all(self._target[k] == self.home[k] for k in self._target)
+        return commanded and self.error(observation) <= self.tolerance

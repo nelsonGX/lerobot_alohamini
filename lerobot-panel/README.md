@@ -176,7 +176,12 @@ panel: Claude (tools) ─► sentences ─► ElevenLabs (eleven_v4) ─► mp3 
 Claude's tools (`server/kiosk.py`): `look_at_table` (chest + overhead camera stills, through the same relay
 as the camera previews), `check_inventory` (simulated stock: on display / in the back / sold), `pick_item`
 (a one-episode live evaluation of that item's checkpoint on the GPU server, i.e. the same job as **Train &
-Eval → Live robot**, without recording), `check_pick_status`, `stop_robot`, `notify_owner` (notes on the
+Eval → Live robot**, without recording), `check_pick_status`, `look_at_customer` (a photo from the iPad's front camera, for when the customer
+points or gestures; it sends that photo to Claude, so turn off *Claude may look at the customer* in setup if
+you don't want that), `reset_arm` (moves the arms back to the pose they had when the robot was armed, so a
+missed pick can be retried: after a pick Claude looks at the table, and if the cake is still there it calls
+`reset_arm` and then `pick_item` with `retry`, which undoes that pick's sale; at most 3 tries per item per
+conversation), `stop_robot`, `notify_owner` (notes on the
 owner tab), and `clear_context` (when a customer says goodbye or asks to start over, Claude says goodbye and
 then forgets the conversation; **Reset** in the debug drawer and the idle timeout do the same). When a pick ends, the panel marks the item sold, notifies the owner (restock or sold out) and
 tells Claude, which then speaks without waiting to be asked.
@@ -199,7 +204,8 @@ Setup:
    Also: the Claude model (default `claude-opus-5-5` at low effort; a smaller model such as
    `claude-haiku-5-5` answers faster), the ElevenLabs voice (pick one that speaks Mandarin well) and the language.
 4. Start the robot host **with cameras** and connect the GPU server, as for live evaluation.
-5. Tap **Arm** when an operator is standing by. Arming warms the robot up: one live evaluation job on the
+5. Put the arms in the pose the pick episodes start from, then tap **Arm** with an operator standing by
+   (that pose becomes the "home" `reset_arm` returns to). Arming warms the robot up: one live evaluation job on the
    GPU server (`kiosk-standby`) loads every cake's checkpoint and connects to the robot (~7 s, shown in the
    debug drawer), then waits. Each pick is then just a `start <item>` command to that job, so the arm moves
    within about a second; after the episode it goes back to waiting. Until armed the robot will not move,

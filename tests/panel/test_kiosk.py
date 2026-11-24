@@ -359,6 +359,38 @@ def test_coming_back_cancels_the_reset(env):
     assert session.messages and not client.of("reset")
 
 
+class CameraClient(Client):
+    """The iPad: answers photo requests with a JPEG (or an error) like the kiosk page does."""
+
+    def __init__(self, session, image=None, error=None):
+        super().__init__()
+        self.session, self.image, self.error = session, image, error
+
+    async def send_json(self, event):
+        await super().send_json(event)
+        if event["type"] == "photo_request":
+            self.session.photo_received(event["id"], self.image, self.error)
+
+
+def test_look_at_customer_returns_the_ipads_photo(env):
+    session, client = env  # client: a monitor laptop, which never answers
+    session.clients.add(CameraClient(session, image="aGVsbG8="))
+    content = asyncio.run(session.tool_look_at_customer())
+    assert content[1]["source"] == {"type": "base64", "media_type": "image/jpeg", "data": "aGVsbG8="}
+    assert not session.photo_requests  # cleaned up
+
+
+def test_look_at_customer_explains_why_there_is_no_photo(env, monkeypatch):
+    session, _ = env
+    monkeypatch.setattr(kiosk, "PHOTO_TIMEOUT_S", 0.05)
+    session.clients.add(CameraClient(session, error="camera error"))
+    with pytest.raises(kiosk.ToolError, match="camera error"):
+        asyncio.run(session.tool_look_at_customer())
+    kiosk.store.update(lambda c: setattr(c, "customer_photos", False))
+    with pytest.raises(kiosk.ToolError, match="turned off"):
+        asyncio.run(session.tool_look_at_customer())
+
+
 def test_interrupt_keeps_history_valid(env):
     session, client = env
     session._client = FakeClaude([
@@ -440,8 +472,9 @@ def test_simulated_pick_updates_inventory_and_reacts(env):
 class FakeGPU:
     """A GPU agent: jobs, their [EVAL:event] lines, and the commands sent to them."""
 
-    def __init__(self, standby_supported=True):
+    def __init__(self, standby_supported=True, home_ok=True):
         self.standby_supported = standby_supported
+        self.home_ok = home_ok
         self.jobs = {}
         self.commands = []
 
@@ -479,6 +512,11 @@ class FakeGPU:
             self.commands.append((job["id"], body))
             if body["command"] == "start":
                 job["pending"] = body["policy"]
+            elif body["command"] == "home":
+                self.line(job, "homing")
+                self.line(
+                    job, "homed", ok=self.home_ok, **({} if self.home_ok else {"reason": "joint protection"})
+                )
             elif body["command"] == "end" and job.get("running"):
                 job["running"] = None
                 self.line(job, "episode_end", episode=1)
@@ -550,6 +588,86 @@ def test_arming_warms_up_and_picks_use_the_loaded_policy(env):
     assert session.standby.state == "ready"  # still warm for the next customer
     assert client.of("robot_event")
     assert any(e["standby"]["state"] == "loading" for e in client.of("standby"))
+
+
+async def warm_up(session):
+    await session.config_changed(arm_with_checkpoints())
+    for _ in range(100):
+        if session.standby.state == "ready":
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail("standby never got ready")
+
+
+async def pick_done(session):
+    for _ in range(200):
+        if session.pick and not session.pick.active and session.pick_task and session.pick_task.done():
+            await settle(session)
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail("pick never finished")
+
+
+def test_a_missed_pick_is_retried_after_moving_the_arms_home(env):
+    session, client = env
+    gpu = FakeGPU()
+    kiosk.configure(camera_feed=None, camera_port=5557, start_job=gpu.start_job, gpu_call=gpu.call)
+    reply = lambda: FakeStream(text_events("好。"), message([text_block("好。")], "end_turn"))  # noqa: E731
+    session._client = FakeClaude([reply(), reply()])
+    tiramisu = lambda: next(i for i in kiosk.store.load().items if i.id == "tiramisu")  # noqa: E731
+
+    async def run():
+        await warm_up(session)
+        await session.tool_pick_item("tiramisu")
+        await pick_done(session)
+        assert tiramisu().sold == 1 and not tiramisu().on_table  # the episode "finished": counted as sold
+        assert "Not while" not in await session.tool_reset_arm()  # Claude saw it missed
+        assert session.standby.state == "ready"
+        with pytest.raises(kiosk.ToolError, match="no 提拉米蘇 is on the table"):
+            await session.tool_pick_item("tiramisu")  # a new pick: the inventory says it was sold
+        assert "Started" in await session.tool_pick_item("tiramisu", retry=True)  # undoes the sale first
+        assert tiramisu().sold == 0
+        await pick_done(session)
+
+    asyncio.run(run())
+    job_id = next(iter(gpu.jobs))
+    assert [c for _, c in gpu.commands] == [
+        {"command": "start", "policy": "tiramisu"},
+        {"command": "home"},
+        {"command": "start", "policy": "tiramisu"},
+    ]
+    assert all(j == job_id for j, _ in gpu.commands)
+    assert tiramisu().sold == 1  # sold once, not twice
+    assert any("Retrying" in n["message"] for n in session.notifications)
+
+
+def test_reset_arm_refuses_mid_pick_and_reports_a_failed_move(env):
+    session, client = env
+    gpu = FakeGPU(home_ok=False)
+    kiosk.configure(camera_feed=None, camera_port=5557, start_job=gpu.start_job, gpu_call=gpu.call)
+    session._client = FakeClaude([FakeStream(text_events("好。"), message([text_block("好。")], "end_turn"))])
+
+    async def run():
+        await warm_up(session)
+        await session.tool_pick_item("strawberry_cake")
+        with pytest.raises(kiosk.ToolError, match="still running"):
+            await session.tool_reset_arm()
+        await pick_done(session)
+        with pytest.raises(kiosk.ToolError, match="joint protection"):
+            await session.tool_reset_arm()
+
+    asyncio.run(run())
+    assert session.notifications[0]["urgent"] and "starting pose" in session.notifications[0]["message"]
+    assert session.standby.state == "ready"
+
+
+def test_picks_of_one_item_are_capped_per_conversation(env):
+    session, _ = env
+    kiosk.store.update(lambda c: setattr(c, "armed", True) or setattr(c, "simulate_picks", True))
+    session.attempts = {"strawberry_cake": kiosk.MAX_ATTEMPTS}
+    with pytest.raises(kiosk.ToolError, match="already been tried"):
+        asyncio.run(session.tool_pick_item("strawberry_cake"))
+    assert "simulated" in asyncio.run(session.tool_reset_arm())
 
 
 def test_disarm_and_stop_unload_the_warm_job(env):

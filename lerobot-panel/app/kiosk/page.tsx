@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { LIPS_STD, nearNow, newVision, startVision, summarize, type Vision, type VisionSummary } from "./vision";
 
 type Item = { id: string; name: string; description: string; price: string; position: string; on_table: boolean; back_stock: number; sold: number; checkpoint: string; task: string; episode_time_s: number };
-type Config = { shop_name: string; language: string; model: string; effort: "low" | "medium" | "high"; tts_model: string; voice_id: string; extra_instructions: string; armed: boolean; simulate_picks: boolean; idle_reset_s: number; mic_gate_db: number; barge_in_chars: number; addressee_model: string; camera_listen: boolean; face_min_size: number; camera_zoom: number; camera_crop_y: number; greet_on_arrival: boolean; leave_reset_s: number; items: Item[] };
+type Config = { shop_name: string; language: string; model: string; effort: "low" | "medium" | "high"; tts_model: string; voice_id: string; extra_instructions: string; armed: boolean; simulate_picks: boolean; idle_reset_s: number; mic_gate_db: number; barge_in_chars: number; addressee_model: string; camera_listen: boolean; face_min_size: number; camera_zoom: number; camera_crop_y: number; greet_on_arrival: boolean; leave_reset_s: number; customer_photos: boolean; items: Item[] };
 type Pick = { job_id: string; item_id: string; item_name: string; state: string; detail: string; active: boolean; elapsed_s: number; time_limit_s: number; simulated: boolean; episode_started_at: number | null };
 type Note = { at: number; message: string; urgent: boolean; source: string };
 type LogEvent = { type: string; at: number; [k: string]: unknown };
@@ -241,6 +241,17 @@ export default function KioskPage() {
           case "standby": setStandby(ev.standby as Standby); return;
           case "notification": setNotes((n) => [ev as unknown as Note, ...n].slice(0, 50)); break;
           case "notifications_cleared": setNotes([]); return;
+          case "photo_request": { // Claude's look_at_customer: one front-camera frame, as the camera sees it
+            if (monitorRef.current) return;
+            const video = vision.current.video;
+            if (vision.current.state !== "on" || !video) { send({ type: "photo", id: ev.id, error: `camera ${vision.current.state}` }); return; }
+            const c = document.createElement("canvas");
+            c.width = Math.min(800, video.videoWidth);
+            c.height = Math.round((c.width * video.videoHeight) / video.videoWidth);
+            c.getContext("2d")?.drawImage(video, 0, 0, c.width, c.height);
+            send({ type: "photo", id: ev.id, image: c.toDataURL("image/jpeg", 0.75).split(",")[1] });
+            return;
+          }
           case "interrupted": stopAudio(); break;
           case "reset": if (!ev.keep_audio) stopAudio(); setCaption(""); setHeard(""); setEmotion("happy"); break;
           case "user": stopAudio(); setHeard(ev.text as string); break; // accepted: the robot stops and listens
@@ -251,7 +262,7 @@ export default function KioskPage() {
     };
     open();
     return () => { closed = true; clearTimeout(retry); ws.current?.close(); };
-  }, [addLog, enqueueSpeech, stopAudio, duck]);
+  }, [addLog, enqueueSpeech, stopAudio, duck, send]);
 
   // ---- microphone -> AssemblyAI
 
@@ -557,6 +568,7 @@ function Setup({ config, save, box, levels, vision, halfDuplex, setHalfDuplex }:
           <input type="range" min={1} max={3} step={0.1} value={draft.camera_zoom} onChange={(e) => setDraft({ ...draft, camera_zoom: Number(e.target.value) })} />)}
         {field(`Zoomed part: ${draft.camera_crop_y <= 0.15 ? "top" : draft.camera_crop_y >= 0.85 ? "bottom" : draft.camera_crop_y < 0.45 ? "upper" : draft.camera_crop_y > 0.55 ? "lower" : "middle"} (move it to where customers' faces are)`,
           <input type="range" min={0} max={1} step={0.05} value={draft.camera_crop_y} onChange={(e) => setDraft({ ...draft, camera_crop_y: Number(e.target.value) })} />)}
+        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.customer_photos} onChange={(e) => setDraft({ ...draft, customer_photos: e.target.checked })} /> Claude may look at the customer (sends a front-camera photo to Claude when it calls look_at_customer)</label>
         <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.greet_on_arrival} onChange={(e) => setDraft({ ...draft, greet_on_arrival: e.target.checked })} /> Greet people who walk up</label>
         {field("New customer when nobody is at the counter for (s, 0 = off)", <input type="number" min={0} max={600} value={draft.leave_reset_s} onChange={(e) => setDraft({ ...draft, leave_reset_s: Number(e.target.value) })} className={box} />)}
       </div>

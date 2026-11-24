@@ -38,7 +38,13 @@ FACES = ("happy", "excited", "thinking", "sad", "surprised", "love", "neutral")
 MAX_TOOL_STEPS = 8
 PICK_POLL_S = 1.0
 STANDBY_JOB_NAME = "kiosk-standby"
-STANDBY_START_TIMEOUT_S = 120  # a pick waiting for the warm job to load (or to be idle) gives up after this
+STANDBY_START_TIMEOUT_S = 120
+PHOTO_TIMEOUT_S = 3
+MAX_PHOTO_B64 = 2_000_000
+HOME_WAIT_S = 40  # the eval script gives up after 20 s of moving
+SIM_HOME_S = 2
+MAX_ATTEMPTS = 3  # picks of one item per conversation (the first try and two retries)
+RETRY_WINDOW_S = 600  # a finished pick can be retried (and its sale undone) this long after it ended  # a pick waiting for the warm job to load (or to be idle) gives up after this
 SIM_PICK_S = 8  # how long a simulated pick pretends to take
 
 # ---------- config & simulated inventory (one JSON file, edited from the kiosk's debug drawer) ----------
@@ -94,6 +100,8 @@ class KioskConfig(BaseModel):
     greet_on_arrival: bool = True
     # Start over for the next customer once nobody has been at the counter this long (0 = off).
     leave_reset_s: int = Field(default=20, ge=0, le=600)
+    # Let Claude ask the iPad for a photo of the customer (look_at_customer). Off: the camera stays on-device.
+    customer_photos: bool = True
     items: list[Item] = Field(
         default_factory=lambda: [
             Item(
@@ -253,8 +261,15 @@ back stock, say staff can bring one from the back and notify the owner. If it is
 the alternative.
 - Call pick_item only once the customer has clearly chosen one item that is on the table. If the choice is \
 unclear, ask. Tell them you are getting it as you start. Never start a second pick while one is running.
+- When a pick ends, look_at_table to see whether the cake is in the takeaway box. If it missed (the cake \
+is still on the table, tipped over, or the arm stopped short), tell the customer you will try again, call \
+reset_arm, then pick_item for the same item with retry=true (that corrects the inventory). After a second miss, \
+apologise, notify_owner, and say staff will help.
 - While a pick runs, keep chatting if spoken to; check_pick_status says how it is going. If the customer says \
 stop, or anything sounds unsafe, call stop_robot immediately.
+- look_at_customer shows you the customer (the iPad's front camera). Use it when they point, gesture or \
+say "this one", not on every turn. Never comment on looks, age guesses or anything personal beyond what \
+helps serve them.
 - Messages starting with [Robot event] come from your own systems, not the customer. React to them out loud \
 in one short sentence (for example, hand over the cake when a pick finishes).
 - If a tool reports the robot is not armed or another problem, explain briefly and offer to call staff \
@@ -305,6 +320,13 @@ TOOLS = [
         },
     ),
     _tool(
+        "look_at_customer",
+        "Take a photo with the iPad's front camera, which faces the customer standing at the counter. Use it "
+        "when you need to see them: they point or gesture ('this one', holding up fingers), you want to know "
+        "who you are talking to (a child, a group), or to check they are still there. Not needed for normal "
+        "talk. The photo is the camera's view, so the customer's right hand appears on the left.",
+    ),
+    _tool(
         "check_inventory",
         "Read the shop's inventory system: for every item, whether one is on display on the "
         "table, how many are in the back, how many were sold today, and whether the robot has a trained pick "
@@ -314,11 +336,24 @@ TOOLS = [
         "pick_item",
         "Start the robot arm picking one item from the table and putting it into the takeaway box. "
         "Returns immediately; the pick takes 20-60 seconds. You will get a [Robot event] when it ends.",
-        {"item_id": {"type": "string", "description": "Item id from the catalog."}},
+        {
+            "item_id": {"type": "string", "description": "Item id from the catalog."},
+            "retry": {
+                "type": "boolean",
+                "description": "true only to retry the item whose last pick missed, after look_at_table showed "
+                "it is still on the table (undoes that pick's sale). Leave out for a new pick.",
+            },
+        },
         ["item_id"],
     ),
     _tool(
         "check_pick_status", "How the current (or last) pick is going: state, seconds elapsed, time limit."
+    ),
+    _tool(
+        "reset_arm",
+        "Move both arms back to their starting pose (where they were when staff armed the robot). Use it "
+        "after a pick that missed, before calling pick_item again, or when the arms are left in an odd "
+        "position. Takes up to ~20 s and returns once the arms are home. Not while a pick is running.",
     ),
     _tool(
         "stop_robot",
@@ -379,6 +414,7 @@ class Pick(BaseModel):
     ended_at: float | None = None
     simulated: bool = False
     mode: Literal["job", "standby", "sim"] = "job"  # standby: one episode of the warm job
+    retried: bool = False  # a retry already undid this pick's sale
 
     @property
     def active(self) -> bool:
@@ -606,6 +642,10 @@ class Session:
         self.present = False
         self.greeted_at = 0.0
         self.leave_task: asyncio.Task | None = None
+        self.home_result: asyncio.Future | None = None
+        self.photo_requests: dict[str, asyncio.Future] = {}
+        self.photo_errors: dict[str, str] = {}
+        self.attempts: dict[str, int] = {}  # picks per item in this conversation
         self.clients: set[WebSocket] = set()
         self.log: deque[dict] = deque(maxlen=400)
         self.turn_task: asyncio.Task | None = None
@@ -841,6 +881,7 @@ class Session:
     async def reset(self, reason: str = "reset", keep_audio: bool = False) -> None:
         await self.interrupt(reason)
         self.messages = []
+        self.attempts = {}
         self.clear_after_turn = False
         await self.emit({"type": "reset", "reason": reason, "keep_audio": keep_audio})
 
@@ -1040,6 +1081,43 @@ class Session:
             )
         return content
 
+    async def tool_look_at_customer(self) -> list[dict]:
+        if not store.load().customer_photos:
+            raise ToolError("Staff turned off photos of customers; go by what they say.")
+        jpeg = await self.customer_photo()
+        return [
+            {"type": "text", "text": "iPad front camera (facing the customer):"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": jpeg}},
+        ]
+
+    async def customer_photo(self) -> str:
+        """Ask the iPad(s) for a front-camera JPEG (base64); the first answer wins."""
+        request_id = uuid.uuid4().hex[:8]
+        future = asyncio.get_running_loop().create_future()
+        self.photo_requests[request_id] = future
+        try:
+            await self.emit({"type": "photo_request", "id": request_id}, keep=False)
+            try:
+                return await asyncio.wait_for(future, PHOTO_TIMEOUT_S)
+            except TimeoutError:
+                why = (
+                    self.photo_errors.get(request_id)
+                    or "camera off, not allowed, or the kiosk page not started"
+                )
+                raise ToolError(f"The iPad's front camera gave no photo ({why}).") from None
+        finally:
+            self.photo_requests.pop(request_id, None)
+            self.photo_errors.pop(request_id, None)
+
+    def photo_received(self, request_id: str, image: str | None, error: str | None) -> None:
+        future = self.photo_requests.get(request_id)
+        if future is None or future.done():
+            return
+        if image and len(image) <= MAX_PHOTO_B64:
+            future.set_result(image)
+        elif error:  # this iPad can't take one; another client may still answer
+            self.photo_errors[request_id] = error
+
     async def tool_check_inventory(self) -> str:
         cfg = store.load()
         rows = [{
@@ -1056,13 +1134,41 @@ class Session:
             note = ""
         return json.dumps({"items": rows}, ensure_ascii=False) + note
 
-    async def tool_pick_item(self, item_id: str) -> str:
+    async def tool_pick_item(self, item_id: str, retry: bool = False) -> str:
         cfg = store.load()
         item = next((i for i in cfg.items if i.id == item_id), None)
         if item is None:
             raise ToolError(f"No item with id {item_id}. Valid ids: {', '.join(i.id for i in cfg.items)}.")
         if self.pick and self.pick.active:
             raise ToolError(f"A pick of the {self.pick.item_name} is already running.")
+        if self.attempts.get(item.id, 0) >= MAX_ATTEMPTS:
+            raise ToolError(
+                f"The {item.name} has already been tried {MAX_ATTEMPTS} times in this conversation. "
+                "Apologise and ask staff to help (notify_owner)."
+            )
+        last = self.pick
+        retry = (
+            retry
+            and not item.on_table
+            and cfg.armed
+            and last is not None
+            and last.item_id == item.id
+            and last.state == "succeeded"
+            and not last.retried
+            and time.time() - (last.ended_at or 0) < RETRY_WINDOW_S
+        )
+        if retry:
+            # The last pick of this item "finished" but missed: it is still on the table, so undo the sale.
+            def unsell(c: KioskConfig) -> None:
+                for i in c.items:
+                    if i.id == item.id:
+                        i.on_table, i.sold = True, max(0, i.sold - 1)
+
+            cfg = store.update(unsell)
+            item = next(i for i in cfg.items if i.id == item_id)
+            last.retried = True
+            await self.emit({"type": "config", "config": cfg.model_dump()}, keep=False)
+            await self.notify(f"Retrying the {item.name}: the last pick missed (ignore the restock note).")
         if not item.on_table:
             raise ToolError(
                 f"The inventory says no {item.name} is on the table "
@@ -1102,6 +1208,7 @@ class Session:
                     raise ToolError(f"The robot could not start: {e.detail}") from None
                 self.pick = Pick(job_id=job["id"], item_id=item.id, item_name=item.name, started_at=time.time(),
                                  time_limit_s=item.episode_time_s)  # fmt: skip
+        self.attempts[item.id] = self.attempts.get(item.id, 0) + 1
         if cfg.simulate_picks:
             self.pick.mode = "sim"
         await self.emit({"type": "pick", "pick": self.pick.summary()})
@@ -1111,6 +1218,47 @@ class Session:
             f"Started picking the {item.name} (up to {self.pick.time_limit_s} s). "
             "You will get a [Robot event] when it ends."
         )
+
+    async def tool_reset_arm(self) -> str:
+        cfg = store.load()
+        if self.pick and self.pick.active:
+            raise ToolError(
+                f"The {self.pick.item_name} pick is still running; wait for it or call stop_robot."
+            )
+        if not cfg.armed:
+            raise ToolError("The robot arm is not armed by staff, so it cannot move right now.")
+        if cfg.simulate_picks:
+            await asyncio.sleep(SIM_HOME_S)
+            return "The arms are back in their starting pose (simulated). You can pick again."
+        await self.ensure_standby(cfg)
+        if not self.standby.running or self.standby.state != "ready":
+            raise ToolError(
+                f"The robot isn't ready to move its arms home (warm job: {self.standby.state}"
+                f"{', ' + self.standby.detail if self.standby.detail else ''}). Ask staff to check it."
+            )
+        self.home_result = asyncio.get_running_loop().create_future()
+        try:
+            try:
+                await asyncio.to_thread(
+                    _hooks["gpu_call"], "POST", f"/jobs/{self.standby.job_id}/command", {"command": "home"}
+                )
+            except HTTPException as e:
+                raise ToolError(
+                    f"The robot could not move home: {e.detail} (the GPU server may need updating)."
+                ) from None
+            await self._set_standby(state="busy", detail="moving the arms home")
+            try:
+                ok, reason = await asyncio.wait_for(asyncio.shield(self.home_result), HOME_WAIT_S)
+            except TimeoutError:
+                raise ToolError(
+                    "The robot did not report back about moving home. Ask staff to check it."
+                ) from None
+        finally:
+            self.home_result = None
+        if not ok:
+            await self.notify(f"The arms could not get back to their starting pose: {reason}.", urgent=True)
+            raise ToolError(f"The arms could not get home ({reason}). Staff have been notified.")
+        return "The arms are back in their starting pose. You can pick again."
 
     async def tool_check_pick_status(self) -> str:
         if not self.pick:
@@ -1287,6 +1435,10 @@ class Session:
                     if pick and pick.state == "starting" and ev.get("policy") == pick.item_id:
                         pick.state, pick.episode_started_at = "running", ev.get("at", time.time())
                         await self.emit({"type": "pick", "pick": pick.summary()}, keep=False)
+                elif kind == "homed":
+                    await self._set_standby(state="ready", detail="")
+                    if self.home_result and not self.home_result.done():
+                        self.home_result.set_result((bool(ev.get("ok")), ev.get("reason") or ""))
                 elif kind == "episode_end" and pick and pick.state in ("running", "stopping"):
                     pick.state = "succeeded" if pick.state == "running" else "stopped"
                     await self._end_pick(pick)
@@ -1297,6 +1449,8 @@ class Session:
                 pick = None
             if record["state"] not in ("running", "stopping"):
                 ended_by_us = job_id in self._stop_requested
+                if self.home_result and not self.home_result.done():
+                    self.home_result.set_result((False, "the robot job ended"))
                 tail = " ".join((record.get("lines") or [])[-3:])[-300:]
                 await self._set_standby(
                     state="off" if ended_by_us else "error",
@@ -1385,15 +1539,17 @@ class Session:
                 else:
                     await self.notify(f"{item.name} is now sold out.", urgent=True)
             text = (
-                f"The pick of the {pick.item_name} finished after {took} s. It should now be in the takeaway "
-                "box; you can look_at_table to confirm. The inventory was updated."
+                f"The pick of the {pick.item_name} finished after {took} s and the inventory counts it as sold. "
+                "look_at_table to check it is in the takeaway box; if it missed, reset_arm and pick_item it again "
+                "with retry=true (that undoes the sale)."
             )
         elif pick.state == "stopped":
             text = f"The pick of the {pick.item_name} was stopped after {took} s. The arm is holding still."
         else:
             text = (
                 f"The pick of the {pick.item_name} ended with a problem ({pick.state}"
-                f"{': ' + pick.detail if pick.detail else ''})."
+                f"{': ' + pick.detail if pick.detail else ''}). If the robot is still ready, you may reset_arm "
+                "and try once more; otherwise tell the customer staff will help."
             )
             await self.notify(f"Robot pick of {pick.item_name} ended: {pick.state}.", urgent=True)
         await self.robot_event(text)
@@ -1487,6 +1643,8 @@ async def kiosk_ws(ws: WebSocket) -> None:
                         vision=_vision(msg.get("vision")),
                     )
                 )
+            elif kind == "photo":
+                session.photo_received(str(msg.get("id", "")), msg.get("image"), msg.get("error"))
             elif kind == "presence":
                 asyncio.create_task(session.presence(bool(msg.get("present"))))
             elif kind == "interrupt":

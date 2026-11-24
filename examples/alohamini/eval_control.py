@@ -15,7 +15,7 @@ EVENT_PREFIX = "[EVAL:event] "
 # success/fail/end finish the running episode (with or without a verdict); during the wait
 # between episodes success/fail relabel the last one and start begins the next one now
 # ("start <policy>" in standby mode also chooses which loaded policy runs it).
-COMMANDS = ("success", "fail", "end", "discard", "start")
+COMMANDS = ("success", "fail", "end", "discard", "start", "home")
 
 
 def parse_command(line: str) -> str | None:
