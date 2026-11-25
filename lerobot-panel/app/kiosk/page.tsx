@@ -6,11 +6,13 @@
  * from another screen without mic or sound. */
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Contactless, PAY_KEYFRAMES } from "./contactless";
 import { LIPS_STD, nearNow, newVision, startVision, summarize, type Vision, type VisionSummary } from "./vision";
 
 type Item = { id: string; name: string; description: string; price: string; position: string; on_table: boolean; back_stock: number; sold: number; checkpoint: string; task: string; episode_time_s: number };
-type Config = { shop_name: string; language: string; model: string; effort: "low" | "medium" | "high"; tts_model: string; voice_id: string; extra_instructions: string; armed: boolean; simulate_picks: boolean; idle_reset_s: number; mic_gate_db: number; barge_in_chars: number; addressee_model: string; camera_listen: boolean; face_min_size: number; camera_zoom: number; camera_crop_y: number; greet_on_arrival: boolean; leave_reset_s: number; customer_photos: boolean; items: Item[] };
-type Pick = { job_id: string; item_id: string; item_name: string; state: string; detail: string; active: boolean; elapsed_s: number; time_limit_s: number; simulated: boolean; episode_started_at: number | null };
+type Config = { shop_name: string; language: string; model: string; effort: "low" | "medium" | "high"; tts_model: string; voice_id: string; extra_instructions: string; armed: boolean; simulate_picks: boolean; idle_reset_s: number; mic_gate_db: number; barge_in_chars: number; duck_gain: number; addressee_model: string; camera_listen: boolean; face_min_size: number; camera_zoom: number; camera_crop_y: number; greet_on_arrival: boolean; leave_reset_s: number; customer_photos: boolean; pick_watch_model: string; pick_watch_after_s: number; pick_watch_every_s: number; pick_watch_misses: number; items: Item[] };
+type Pick = { job_id: string; item_id: string; item_name: string; state: string; detail: string; active: boolean; elapsed_s: number; time_limit_s: number; simulated: boolean; episode_started_at: number | null; verdict: "in_box" | "missed" | null; last_check: string };
+type Payment = { id: string; item_id: string; item_name: string; amount: string; state: "pending" | "paid" | "declined" | "cancelled"; reason: string; created_at: number; ended_at: number | null };
 type Note = { at: number; message: string; urgent: boolean; source: string };
 type LogEvent = { type: string; at: number; [k: string]: unknown };
 type Keys = { anthropic: boolean; assemblyai: boolean; elevenlabs: boolean };
@@ -27,7 +29,6 @@ const GATE_OFF_DB = -80;
 const FRAME_MS = 50; // one mic level reading per worklet frame
 const LOUD_MS = 250; // a turn needs this much speech above the gate to count
 const TURN_LEAD_MS = 2000; // speech starts this long before its first transcript arrives
-const DUCK_GAIN = 0.2; // the robot's volume while it waits to hear whether it was interrupted
 const DUCK_MAX_MS = 6000; // give up waiting and come back to full volume
 
 type Levels = { t: number[]; db: number[] };
@@ -44,6 +45,13 @@ function speechLength(text: string) {
   const cjk = (text.match(/[㐀-鿿]/g) ?? []).length;
   const words = text.replace(/[㐀-鿿]/g, " ").trim().split(/\s+/).filter(Boolean).length;
   return cjk + words * 2;
+}
+
+/** `part` (a partial transcript) looks like the customer saying `said` again. */
+function repeats(part: string, said: string) {
+  const norm = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const a = norm(part), b = norm(said);
+  return a.length > 0 && b.includes(a);
 }
 
 export default function KioskPage() {
@@ -64,6 +72,7 @@ export default function KioskPage() {
   const [heard, setHeard] = useState("");
   const [log, setLog] = useState<LogEvent[]>([]);
   const [pick, setPick] = useState<Pick | null>(null);
+  const [payment, setPayment] = useState<Payment | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   const [keys, setKeys] = useState<Keys | null>(null);
@@ -78,6 +87,7 @@ export default function KioskPage() {
   const sources = useRef<Set<AudioBufferSourceNode>>(new Set());
   const outGain = useRef<GainNode | null>(null);
   const ducked = useRef(false);
+  const lastSaid = useRef(""); // the customer's last accepted utterance: saying it again doesn't duck the robot
   const duckTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const playAt = useRef(0);
   const chain = useRef<Promise<void>>(Promise.resolve());
@@ -89,14 +99,14 @@ export default function KioskPage() {
   const halfDuplexRef = useRef(false);
   const monitorRef = useRef(false);
   const cfgLang = useRef("zh-TW");
-  const gateRef = useRef({ db: -45, chars: 6 });
+  const gateRef = useRef({ db: -45, chars: 6, duck: 0.2 });
   const levels = useRef<Levels>({ t: [], db: [] });
   const vision = useRef<Vision>(newVision());
   const camRef = useRef({ on: true, minSize: 0.06, zoom: 1.5, cropY: 0.3 });
   useEffect(() => {
     camRef.current = { on: config?.camera_listen ?? true, minSize: config?.face_min_size ?? 0.06, zoom: config?.camera_zoom ?? 1.5, cropY: config?.camera_crop_y ?? 0.3 };
   }, [config?.camera_listen, config?.face_min_size, config?.camera_zoom, config?.camera_crop_y]);
-  useEffect(() => { gateRef.current = { db: config?.mic_gate_db ?? -45, chars: config?.barge_in_chars ?? 6 }; }, [config?.mic_gate_db, config?.barge_in_chars]);
+  useEffect(() => { gateRef.current = { db: config?.mic_gate_db ?? -45, chars: config?.barge_in_chars ?? 6, duck: config?.duck_gain ?? 0.2 }; }, [config?.mic_gate_db, config?.barge_in_chars, config?.duck_gain]);
   useEffect(() => { halfDuplexRef.current = halfDuplex; }, [halfDuplex]);
   useEffect(() => { cfgLang.current = config?.language ?? "zh-TW"; }, [config?.language]);
   useEffect(() => { monitorRef.current = monitor; }, [monitor]);
@@ -113,7 +123,7 @@ export default function KioskPage() {
     const set = (down: boolean) => {
       ducked.current = down;
       const g = outGain.current;
-      if (g) g.gain.setTargetAtTime(down ? DUCK_GAIN : 1, g.context.currentTime, down ? 0.05 : 0.15);
+      if (g) g.gain.setTargetAtTime(down ? gateRef.current.duck : 1, g.context.currentTime, down ? 0.05 : 0.15);
     };
     clearTimeout(duckTimer.current);
     set(on);
@@ -228,6 +238,7 @@ export default function KioskPage() {
             setLog((ev.log as LogEvent[]) ?? []);
             setServerState(ev.state as string);
             setPick(ev.pick as Pick | null);
+            setPayment((ev.payment as Payment | null) ?? null);
             setNotes((ev.notifications as Note[]) ?? []);
             setConfig(ev.config as Config);
             setKeys(ev.keys as Keys);
@@ -237,6 +248,7 @@ export default function KioskPage() {
           case "face": setEmotion(ev.face as string); return;
           case "speech": enqueueSpeech(ev.turn as string, ev.text as string, ev.audio as string | null, (cfgLang.current || "zh-TW")); if (ev.error) addLog({ type: "error", at: ev.at, where: "tts", message: ev.error }); return;
           case "pick": setPick(ev.pick as Pick); break;
+          case "payment": setPayment(ev.payment as Payment); break;
           case "config": setConfig(ev.config as Config); return;
           case "standby": setStandby(ev.standby as Standby); return;
           case "notification": setNotes((n) => [ev as unknown as Note, ...n].slice(0, 50)); break;
@@ -253,8 +265,9 @@ export default function KioskPage() {
             return;
           }
           case "interrupted": stopAudio(); break;
-          case "reset": if (!ev.keep_audio) stopAudio(); setCaption(""); setHeard(""); setEmotion("happy"); break;
-          case "user": stopAudio(); setHeard(ev.text as string); break; // accepted: the robot stops and listens
+          case "reset": if (!ev.keep_audio) stopAudio(); lastSaid.current = ""; setCaption(""); setHeard(""); setEmotion("happy"); break;
+          case "user": stopAudio(); setHeard(ev.text as string); lastSaid.current = ev.text as string; break; // accepted: the robot stops and listens
+          case "noted": duck(false); setHeard(ev.text as string); break; // a repeat or "嗯": remembered, the robot keeps talking
           case "ignored": duck(false); break; // not for us: back to full volume
         }
         addLog(ev);
@@ -326,7 +339,7 @@ export default function KioskPage() {
           if (stop) {
             stopAudio();
             send({ type: "interrupt" });
-          } else if (!ducked.current && speechLength(text) >= gate.chars) {
+          } else if (!ducked.current && speechLength(text) >= gate.chars && !repeats(text, lastSaid.current)) {
             duck(true);
           }
         };
@@ -379,6 +392,7 @@ export default function KioskPage() {
   else if (tool) { face = "•_•"; label = "查詢中…"; }
   else if (serverState === "thinking") { face = ":/"; label = "…"; }
   else if (moving) { face = "^_^"; label = `正在拿${pick?.item_name ?? ""}…`; }
+  else if (payment?.state === "pending") { label = "請感應付款 · tap to pay"; }
   if (blink && !speaking) face = face.replace(/^[:;]/, "·");
 
   const progress = moving && pick ? Math.min(1, pick.elapsed_s / Math.max(1, pick.time_limit_s)) : 0;
@@ -390,6 +404,16 @@ export default function KioskPage() {
           {face}
         </div>
         <div className="mt-6 h-10 text-2xl text-white/60">{label}</div>
+        {payment?.state === "pending" && !moving && (
+          <div className="mt-4 flex items-center gap-6 rounded-3xl bg-white/[0.06] py-4 pl-5 pr-9 ring-1 ring-white/10" style={{ animation: "pay-in .4s ease-out" }}>
+            <style>{PAY_KEYFRAMES}</style>
+            <div className="text-[#4d94ff]"><Contactless size={88} live /></div>
+            <div className="text-left">
+              <div className="text-base text-white/50">{payment.item_name}</div>
+              <div className="text-5xl font-semibold tracking-tight tabular-nums">{payment.amount}</div>
+            </div>
+          </div>
+        )}
         {moving && <div className="mt-2 h-2 w-1/3 overflow-hidden rounded-full bg-white/15"><div className="h-full bg-white/70 transition-all" style={{ width: `${progress * 100}%` }} /></div>}
         <div className="absolute inset-x-0 bottom-6 px-10 text-center">
           {partial ? <p className="text-2xl text-white/50">{partial}</p> : heard && !speaking ? <p className="text-xl text-white/30">「{heard}」</p> : null}
@@ -408,7 +432,7 @@ export default function KioskPage() {
       </div>
       {debug && (
         <Debug
-          log={log} pick={pick} config={config} standby={standby} notes={notes} keys={keys} wsUp={wsUp} stt={stt} serverState={serverState}
+          log={log} pick={pick} payment={payment} config={config} standby={standby} notes={notes} keys={keys} wsUp={wsUp} stt={stt} serverState={serverState}
           monitor={monitor} levels={levels} vision={vision} halfDuplex={halfDuplex} setHalfDuplex={setHalfDuplex} send={send} setConfig={setConfig} sttEndAt={sttEndAt}
         />
       )}
@@ -418,8 +442,8 @@ export default function KioskPage() {
 
 // ---------- debug drawer ----------
 
-function Debug({ log, pick, config, standby, notes, keys, wsUp, stt, serverState, monitor, levels, vision, halfDuplex, setHalfDuplex, send, setConfig }: {
-  log: LogEvent[]; pick: Pick | null; config: Config | null; standby: Standby | null; notes: Note[]; keys: Keys | null; wsUp: boolean; stt: string; serverState: string;
+function Debug({ log, pick, payment, config, standby, notes, keys, wsUp, stt, serverState, monitor, levels, vision, halfDuplex, setHalfDuplex, send, setConfig }: {
+  log: LogEvent[]; pick: Pick | null; payment: Payment | null; config: Config | null; standby: Standby | null; notes: Note[]; keys: Keys | null; wsUp: boolean; stt: string; serverState: string;
   monitor: boolean; levels: React.RefObject<Levels>; vision: React.RefObject<Vision>; halfDuplex: boolean; setHalfDuplex: (v: boolean) => void; send: (m: object) => void; setConfig: (c: Config) => void; sttEndAt: React.RefObject<number | null>;
 }) {
   const [text, setText] = useState("");
@@ -459,9 +483,21 @@ function Debug({ log, pick, config, standby, notes, keys, wsUp, stt, serverState
         <StandbyLine standby={standby} config={config} />
         {pick && (
           <div className="flex items-center gap-2 rounded-md bg-white/5 px-2 py-1.5 font-mono text-xs">
-            <span className="flex-1">{pick.simulated ? "[sim] " : ""}{pick.item_name}: {pick.state} · {pick.elapsed_s}s/{pick.time_limit_s}s {pick.detail}</span>
+            <span className="flex-1">{pick.simulated ? "[sim] " : ""}{pick.item_name}: {pick.state}{pick.verdict ? ` (${pick.verdict === "in_box" ? "in box" : "missed"})` : ""} · {pick.elapsed_s}s/{pick.time_limit_s}s {pick.detail}{pick.active && pick.last_check && !pick.verdict ? ` · cam: ${pick.last_check}` : ""}</span>
             {pick.active && <button onClick={() => send({ type: "end_episode" })} className="rounded bg-white/15 px-2 py-1">done → end episode</button>}
           </div>
+        )}
+        {payment?.state === "pending" ? (
+          <div className="flex items-center gap-2 rounded-md bg-sky-950 px-2 py-1.5 font-mono text-xs">
+            <span className="flex-1">payment {payment.amount} · {payment.item_name}: waiting</span>
+            <button onClick={() => send({ type: "payment_result", id: payment.id, ok: false, reason: "card declined" })} className="rounded bg-red-700 px-2 py-1">fail</button>
+            <button onClick={() => send({ type: "payment_result", id: payment.id, ok: true })} className="rounded bg-green-700 px-2 py-1">success</button>
+          </div>
+        ) : (
+          <p className="text-xs text-white/40">
+            Payments: <a href="/kiosk/terminal" target="_blank" className="underline">mock card terminal</a>
+            {payment ? ` · last: ${payment.amount} ${payment.state}` : ""}
+          </p>
         )}
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { send({ type: "user_text", text }); setText(""); } }}>
           <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type as the customer…" className={`${box} flex-1`} />
@@ -556,6 +592,8 @@ function Setup({ config, save, box, levels, vision, halfDuplex, setHalfDuplex }:
           <input type="range" min={GATE_OFF_DB} max={-10} value={draft.mic_gate_db} onChange={(e) => setDraft({ ...draft, mic_gate_db: Number(e.target.value) })} />)}
         {field("Characters needed to interrupt the robot (停 / 等一下 / stop always work)",
           <input type="number" min={1} max={30} value={draft.barge_in_chars} onChange={(e) => setDraft({ ...draft, barge_in_chars: Number(e.target.value) })} className={box} />)}
+        {field(`Robot volume while someone talks over it: ${draft.duck_gain >= 1 ? "not lowered" : draft.duck_gain <= 0 ? "muted" : `${Math.round(draft.duck_gain * 100)}%`} (until the addressee check decides whether it was an interruption)`,
+          <input type="range" min={0} max={1} step={0.05} value={draft.duck_gain} onChange={(e) => setDraft({ ...draft, duck_gain: Number(e.target.value) })} />)}
         {field("Addressee check model (\"\" = off): ignores speech not said to the robot", text("addressee_model"))}
         <p className="text-xs text-white/40">Turning the gate on or off takes effect after reloading the page (it switches the mic&apos;s automatic gain).</p>
       </div>
@@ -579,6 +617,12 @@ function Setup({ config, save, box, levels, vision, halfDuplex, setHalfDuplex }:
         {field("Effort", <select value={draft.effort} onChange={(e) => setDraft({ ...draft, effort: e.target.value as Config["effort"] })} className={box}><option>low</option><option>medium</option><option>high</option></select>)}
         {field("ElevenLabs model", text("tts_model"))}
         {field("ElevenLabs voice id", text("voice_id"))}
+        {field("Pick camera watch model (\"\" = off): ends a pick early when it's in the box or failing", text("pick_watch_model"))}
+        {field("Watch: first look after (s) · then every (s) · fails in a row to give up", <div className="flex gap-1">
+          <input type="number" min={1} max={120} value={draft.pick_watch_after_s} onChange={(e) => setDraft({ ...draft, pick_watch_after_s: Number(e.target.value) })} className={`${box} w-16`} />
+          <input type="number" min={1} max={60} value={draft.pick_watch_every_s} onChange={(e) => setDraft({ ...draft, pick_watch_every_s: Number(e.target.value) })} className={`${box} w-16`} />
+          <input type="number" min={1} max={10} value={draft.pick_watch_misses} onChange={(e) => setDraft({ ...draft, pick_watch_misses: Number(e.target.value) })} className={`${box} w-16`} />
+        </div>)}
         {field("New customer after idle (s)", <input type="number" value={draft.idle_reset_s} onChange={(e) => setDraft({ ...draft, idle_reset_s: Number(e.target.value) })} className={box} />)}
       </div>
       {field("Extra instructions for Claude", <textarea value={draft.extra_instructions} onChange={(e) => setDraft({ ...draft, extra_instructions: e.target.value })} rows={3} className={box} />)}
@@ -740,6 +784,8 @@ function LogRow({ ev }: { ev: LogEvent }) {
       const v = ev.vision as VisionSummary | null | undefined;
       return <div>{head} <span className="text-sky-300">customer:</span> {String(ev.text)}{v && <span className="text-white/30"> [cam: {v.lips ? "lips moving" : "lips still"}, facing {Math.round(v.facing * 100)}%]</span>}</div>;
     }
+    case "noted":
+      return <div>{head} <span className="text-sky-300/60">customer (robot kept talking):</span> {String(ev.text)}</div>;
     case "presence":
       return <div className="text-white/40">{head} {ev.present ? "someone walked up" : "nobody at the counter"}</div>;
     case "robot_event":
@@ -770,11 +816,20 @@ function LogRow({ ev }: { ev: LogEvent }) {
       return <div className="text-white/30">{head} {String(ev.model)} {String(ev.stop_reason)} · in {u.input_tokens} (cached {u.cache_read_input_tokens ?? 0}) out {u.output_tokens}</div>;
     }
     case "addressee":
-      return <div className={ev.to_robot ? "text-white/30" : "text-orange-300/80"}>{head} {ev.to_robot ? "for me" : "not for me"} ({String(ev.duration_s)}s): {String(ev.text)}</div>;
+      return <div className={ev.to_robot ? "text-white/30" : "text-orange-300/80"}>{head} {ev.verdict === "same" ? "for me, nothing new" : ev.to_robot ? "for me" : "not for me"} ({String(ev.duration_s)}s): {String(ev.text)}</div>;
     case "error":
       return <div className="text-red-400">{head} error [{String(ev.where)}]: {String(ev.message)}</div>;
     case "notification":
       return <div className="text-amber-200">{head} owner note: {String(ev.message)}</div>;
+    case "payment": {
+      const p = ev.payment as Payment;
+      const color = p.state === "paid" ? "text-green-300" : p.state === "declined" ? "text-red-300" : "text-sky-300";
+      return <div className={color}>{head} payment {p.amount} ({p.item_name}): {p.state}{p.reason ? ` · ${p.reason}` : ""}</div>;
+    }
+    case "pick_check": {
+      const color = ev.verdict === "in_box" ? "text-green-300/80" : ev.verdict === "failing" ? "text-orange-300/80" : "text-white/40";
+      return <div className={color}>{head} pick cam {String(ev.elapsed_s)}s: {String(ev.verdict)}{ev.verdict === "failing" ? ` (${String(ev.misses)} in a row)` : ""} {ev.reason ? `· ${String(ev.reason)}` : ""} <span className="text-white/30">{String(ev.duration_s)}s</span></div>;
+    }
     case "pick": {
       const p = ev.pick as Pick;
       return <div className="text-white/50">{head} pick {p.item_name}: {p.state}</div>;

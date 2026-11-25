@@ -275,6 +275,71 @@ def test_side_talk_while_the_robot_talks_does_not_interrupt_it(env):
     assert [m["role"] for m in session.messages] == ["user", "assistant"]
 
 
+def test_repeating_yourself_while_the_robot_replies_does_not_interrupt_it(env):
+    session, client = env
+    session._client = FakeClaude(
+        [
+            FakeStream(
+                text_events("草莓蛋糕來囉，請稍等一下。"), message([text_block("x")], "end_turn"), delay=0.01
+            )
+        ]
+    )
+    checks = []
+    create = session._client.create
+
+    async def spy(**kwargs):
+        checks.append(kwargs)
+        return await create(**kwargs)
+
+    session._client.messages.create = spy
+
+    async def run():
+        await session.user_said("我要一個草莓蛋糕")
+        await asyncio.sleep(0.03)  # still thinking/speaking
+        await session.user_said("草莓蛋糕", {}, mic=True, robot_talking=True)
+        await settle(session)
+
+    asyncio.run(run())
+    assert not client.of("interrupted") and not checks  # spotted locally, no Haiku call
+    assert client.of("noted")[0]["text"] == "草莓蛋糕"
+    assert [m["role"] for m in session.messages] == ["user", "assistant", "user"]
+    assert session.messages[2]["content"].startswith(kiosk.HEARD_PREFIX)
+    assert "草莓蛋糕" in session.messages[2]["content"]
+    assert len(session._client.requests) == 1  # no second reply
+
+
+def test_nothing_new_keeps_talking_but_something_new_interrupts(env):
+    session, client = env
+
+    def long():
+        text = "我們有草莓蛋糕和提拉米蘇，兩個都很好吃喔。"
+        return FakeStream(text_events(text), message([text_block("x")], "end_turn"), delay=0.01)
+
+    session._client = FakeClaude([long(), long()], verdicts=["same", "new"])
+
+    async def run():
+        await session.user_said("有什麼？")
+        await asyncio.sleep(0.05)
+        await session.user_said("嗯嗯好", {}, mic=True, robot_talking=True)  # backchannel
+        assert not client.of("interrupted")
+        await session.user_said("那提拉米蘇多少錢", {}, mic=True, robot_talking=True)
+        await settle(session)
+
+    asyncio.run(run())
+    assert len(client.of("interrupted")) == 1 and len(client.of("noted")) == 1
+    contents = [m["content"] for m in session.messages if m["role"] == "user"]
+    assert contents[0] == "有什麼？" and contents[-1] == "那提拉米蘇多少錢"
+    assert any(str(c).startswith(kiosk.HEARD_PREFIX) and "嗯嗯好" in c for c in contents)
+
+
+def test_is_repeat():
+    assert kiosk.is_repeat("草莓蛋糕。", ["我要一個草莓蛋糕"])
+    assert kiosk.is_repeat("我要一個草莓蛋糕", ["我要一個草莓蛋糕！"])
+    assert kiosk.is_repeat("I want the tiramisu", ["i want tiramisu"])
+    assert not kiosk.is_repeat("那提拉米蘇多少錢", ["我要一個草莓蛋糕"])
+    assert not kiosk.is_repeat("草莓", [])
+
+
 def test_stop_words_and_check_failures_never_block_a_customer(env):
     session, client = env
     session._client = FakeClaude(
@@ -472,9 +537,10 @@ def test_simulated_pick_updates_inventory_and_reacts(env):
 class FakeGPU:
     """A GPU agent: jobs, their [EVAL:event] lines, and the commands sent to them."""
 
-    def __init__(self, standby_supported=True, home_ok=True):
+    def __init__(self, standby_supported=True, home_ok=True, episode_polls=3):
         self.standby_supported = standby_supported
         self.home_ok = home_ok
+        self.episode_polls = episode_polls  # polls an episode runs before it hits its time limit
         self.jobs = {}
         self.commands = []
 
@@ -529,7 +595,7 @@ class FakeGPU:
         if job.get("pending") and job["polls"] >= 2:
             job["running"], job["pending"] = job["pending"], None
             self.line(job, "episode_start", episode=1, policy=job["running"])
-        elif job.get("running") and job["polls"] % 3 == 0:  # runs a few polls, then hits its time limit
+        elif job.get("running") and job["polls"] % self.episode_polls == 0:  # runs a while, then times out
             job["running"] = None
             self.line(job, "episode_end", episode=1)
             self.line(job, "waiting", episode=2)
@@ -641,6 +707,80 @@ def test_a_missed_pick_is_retried_after_moving_the_arms_home(env):
     assert any("Retrying" in n["message"] for n in session.notifications)
 
 
+class TableFeed:
+    def touch(self, *a):
+        pass
+
+    def status(self):
+        return {"cameras": [{"name": "overhead", "live": True}], "error": None}
+
+    def frame(self, name):
+        return (b"\xff\xd8jpeg", 1)
+
+
+def watched_pick(env, monkeypatch, verdicts):
+    """A warm pick that would run for ~10 s, with the camera watch looking every second."""
+    session, client = env
+    gpu = FakeGPU(episode_polls=1000)
+    monkeypatch.setattr(kiosk, "load_settings", lambda: SimpleNamespace(jetson_ip="1.2.3.4"))
+    kiosk.configure(camera_feed=TableFeed(), camera_port=5557, start_job=gpu.start_job, gpu_call=gpu.call)
+    kiosk.store.update(lambda c: setattr(c, "pick_watch_after_s", 1) or setattr(c, "pick_watch_every_s", 1))
+    reply = lambda: FakeStream(text_events("好。"), message([text_block("好。")], "end_turn"))  # noqa: E731
+    session._client = FakeClaude([reply()], verdicts=verdicts)
+
+    async def run():
+        await warm_up(session)
+        await session.tool_pick_item("tiramisu")
+        for _ in range(600):
+            if session.pick_task and session.pick_task.done():
+                break
+            await asyncio.sleep(0.01)
+        await settle(session)
+
+    asyncio.run(run())
+    return session, client, gpu
+
+
+def test_camera_watch_ends_a_failing_pick_early_without_selling(env, monkeypatch):
+    session, client, gpu = watched_pick(
+        env, monkeypatch, ["trying: reaching for it", "failing: box tipped over", "failing: box on its side"]
+    )
+    assert [c["command"] for _, c in gpu.commands] == ["start", "end"]
+    assert session.pick.verdict == "missed" and "box on its side" in session.pick.detail
+    assert [e["verdict"] for e in client.of("pick_check")] == ["trying", "failing", "failing"]
+    tiramisu = next(i for i in kiosk.store.load().items if i.id == "tiramisu")
+    assert tiramisu.on_table and tiramisu.sold == 0  # a miss is not a sale
+    (event,) = client.of("robot_event")
+    assert "failed" in event["text"] and "reset_arm" in event["text"]
+    assert session.standby.state == "ready"  # still warm: reset_arm and pick again right away
+
+
+def test_camera_watch_ends_the_pick_once_it_is_in_the_box(env, monkeypatch):
+    session, client, gpu = watched_pick(env, monkeypatch, ["in_box: tiramisu inside, grippers open"])
+    assert [c["command"] for _, c in gpu.commands] == ["start", "end"]
+    assert session.pick.verdict == "in_box" and session.pick.state == "succeeded"
+    assert next(i for i in kiosk.store.load().items if i.id == "tiramisu").sold == 1
+    assert "camera saw it in the box" in client.of("robot_event")[0]["text"]
+
+
+def test_claude_can_end_a_missed_pick(env, monkeypatch):
+    session, client = env
+    kiosk.store.update(lambda c: setattr(c, "armed", True) or setattr(c, "simulate_picks", True))
+    monkeypatch.setattr(kiosk, "SIM_PICK_S", 60)  # runs until Claude ends it
+    session._client = FakeClaude([FakeStream(text_events("好。"), message([text_block("好。")], "end_turn"))])
+
+    async def run():
+        assert "No pick" in await session.tool_end_pick("missed")
+        await session.tool_pick_item("strawberry_cake")
+        assert "Ending" in await session.tool_end_pick("missed")
+        await pick_done(session)
+
+    asyncio.run(run())
+    item = kiosk.store.load().items[0]
+    assert item.on_table and item.sold == 0
+    assert "Nothing was sold" in client.of("robot_event")[0]["text"]
+
+
 def test_reset_arm_refuses_mid_pick_and_reports_a_failed_move(env):
     session, client = env
     gpu = FakeGPU(home_ok=False)
@@ -746,3 +886,65 @@ def test_pick_start_failure_is_reported_to_claude(env):
         asyncio.run(session.tool_pick_item("strawberry_cake"))
     assert session.pick is None
     assert "robot host" in session.standby.detail
+
+
+# ---------- mock payment ----------
+
+
+def test_payment_needs_a_successful_pick(env):
+    session, _ = env
+    with pytest.raises(kiosk.ToolError, match="nothing to pay for"):
+        asyncio.run(session.tool_request_payment("strawberry_cake"))
+
+
+def test_payment_after_pick_approved_and_declined(env):
+    session, client = env
+    session.pick = kiosk.Pick(job_id="j", item_id="strawberry_cake", item_name="草莓蛋糕", started_at=1,
+                              time_limit_s=40, state="succeeded", ended_at=2)  # fmt: skip
+    session._client = FakeClaude([
+        FakeStream(text_events("{sad}刷卡失敗了，再試一次好嗎？"), message([text_block("…")], "end_turn")),
+        FakeStream(text_events("{happy}謝謝！"), message([text_block("…")], "end_turn")),
+    ])  # fmt: skip
+
+    async def run():
+        assert "NT$180" in await session.tool_request_payment("strawberry_cake")
+        with pytest.raises(kiosk.ToolError, match="already waiting"):
+            await session.tool_request_payment("strawberry_cake")
+        with pytest.raises(kiosk.ToolError, match="payment is still waiting"):
+            await session.tool_clear_context()
+        first = session.payment.id
+        await session.payment_result("stale", True)  # ignored
+        await session.payment_result(first, False, "insufficient funds")
+        await settle(session)
+        await session.payment_result(first, True)  # already answered: ignored
+        await session.tool_request_payment("strawberry_cake")
+        await session.payment_result(session.payment.id, True)
+        await settle(session)
+        with pytest.raises(kiosk.ToolError, match="already paid"):
+            await session.tool_request_payment("strawberry_cake")
+
+    asyncio.run(run())
+    events = [e["text"] for e in client.of("robot_event")]
+    assert len(events) == 2 and "declined (insufficient funds)" in events[0] and "approved" in events[1]
+    assert [e["payment"]["state"] for e in client.of("payment")] == ["pending", "declined", "pending", "paid"]
+    assert_valid_history(session.messages)
+
+
+def test_reset_cancels_a_waiting_payment(env):
+    session, client = env
+    session.pick = kiosk.Pick(job_id="j", item_id="tiramisu", item_name="提拉米蘇", started_at=1,
+                              time_limit_s=40, state="succeeded", ended_at=2)  # fmt: skip
+
+    async def run():
+        await session.tool_request_payment("tiramisu")
+        await session.reset()
+
+    asyncio.run(run())
+    assert session.payment.state == "cancelled" and session.payments == 0
+    assert "payment" in session.snapshot()
+
+
+def test_duck_gain_is_bounded():
+    assert kiosk.KioskConfig().duck_gain == 0.2
+    with pytest.raises(ValueError):
+        kiosk.KioskConfig(duck_gain=1.5)

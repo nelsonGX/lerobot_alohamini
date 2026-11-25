@@ -181,10 +181,21 @@ points or gestures; it sends that photo to Claude, so turn off *Claude may look 
 you don't want that), `reset_arm` (moves the arms back to the pose they had when the robot was armed, so a
 missed pick can be retried: after a pick Claude looks at the table, and if the cake is still there it calls
 `reset_arm` and then `pick_item` with `retry`, which undoes that pick's sale; at most 3 tries per item per
-conversation), `stop_robot`, `notify_owner` (notes on the
+conversation), `request_payment` (mock card payment once
+the cake is in the box: open `/kiosk/terminal` on a phone or second screen, it shows the amount with **Success** /
+**Fail** buttons and Claude reacts to the result; the debug drawer has the same buttons), `stop_robot`, `notify_owner` (notes on the
 owner tab), and `clear_context` (when a customer says goodbye or asks to start over, Claude says goodbye and
 then forgets the conversation; **Reset** in the debug drawer and the idle timeout do the same). When a pick ends, the panel marks the item sold, notifies the owner (restock or sold out) and
 tells Claude, which then speaks without waiting to be asked.
+
+**Camera watch.** While a pick runs, a fast vision model (`pick_watch_model`, default `claude-haiku-5-5`; set
+it to "" in setup to turn it off) looks through the robot's cameras every `pick_watch_every_s` seconds,
+starting `pick_watch_after_s` seconds into the episode. If it sees the cake in the box with the grippers open,
+it ends the episode right away. If it says the pick is failing (dropped, tipped over, the arm stuck or
+grabbing at nothing) `pick_watch_misses` times in a row, it ends the episode, nothing is sold, and Claude is
+told to `reset_arm` and pick again. So Claude no longer has to wait out the time limit. Claude can also end a
+pick itself with `end_pick` (`in_box` or `missed`), for example when the customer says it already fell. Each
+look shows up in the debug log as `pick cam`.
 
 Setup:
 
@@ -211,7 +222,7 @@ Setup:
    within about a second; after the episode it goes back to waiting. Until armed the robot will not move,
    and Claude says so. **Disarm** unloads the models. **STOP** stops the arm (it holds), unloads the models
    and disarms until staff re-arm. **done → end episode** ends a pick early once the cake is in the box
-   (otherwise it runs until that cake's time limit). While armed the job owns the robot, so recording,
+   (the camera watch usually does this on its own). While armed the job owns the robot, so recording,
    teleoperation and calibration are blocked as during any live evaluation. Changing a checkpoint while
    armed reloads the job when no pick is running. If the warm job cannot start (for example the GPU server
    runs an older checkout without `--eval.standby_policies`), each pick falls back to its own job, ~7 s slower.
@@ -223,7 +234,11 @@ with the camera images Claude saw, latency per turn, owner notes) without its ow
 can interrupt the robot by talking: after about 6 characters (*Characters needed to interrupt*) the robot
 turns its voice down, and when the customer finishes, a quick Claude Haiku check (*Addressee check model*,
 about 0.7 s) decides whether it was said to the robot. If yes, the robot stops and answers; if it was people
-talking to each other, the robot carries on at full volume and the log shows "not for me". When the robot is
+talking to each other, the robot carries on at full volume and the log shows "not for me". Because replies
+take a moment, customers often say the same thing again or chime in (嗯, 好, OK) while the robot is still
+thinking or talking: a repeat (spotted locally) or anything the check calls nothing new does not cut the reply
+off. The robot keeps going, the log shows "kept talking", and the words go into the conversation so Claude
+still knows they were said. When the robot is
 quiet, the reply starts at once and waits for the check only before speaking or using a tool, so it adds no
 delay. 停 / 等一下 / stop interrupt at once without a check, and if the check fails it counts as "yes". At a busy booth, set the *loudness gate* (setup): speak at the iPad and watch the meter,
 then watch it while the room talks, and put the gate between the two. Speech quieter than the gate can't

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import difflib
 import json
 import os
 import re
@@ -44,8 +45,10 @@ MAX_PHOTO_B64 = 2_000_000
 HOME_WAIT_S = 40  # the eval script gives up after 20 s of moving
 SIM_HOME_S = 2
 MAX_ATTEMPTS = 3  # picks of one item per conversation (the first try and two retries)
+MAX_PAYMENTS = 3  # card attempts per conversation
 RETRY_WINDOW_S = 600  # a finished pick can be retried (and its sale undone) this long after it ended  # a pick waiting for the warm job to load (or to be idle) gives up after this
 SIM_PICK_S = 8  # how long a simulated pick pretends to take
+PICK_WATCH_TIMEOUT_S = 10  # a camera check that takes longer counts as "still trying"
 
 # ---------- config & simulated inventory (one JSON file, edited from the kiosk's debug drawer) ----------
 
@@ -86,6 +89,9 @@ class KioskConfig(BaseModel):
     # How much a customer must say (CJK characters; a Latin word counts 2) to interrupt the robot mid-sentence.
     # Short stop words (停, 等一下, stop, ...) always interrupt.
     barge_in_chars: int = Field(default=6, ge=1, le=30)
+    # The robot's volume (fraction of full) while someone talks over it, until we know whether it was an
+    # interruption. 1 = don't turn it down, 0 = silent. Applied on the iPad.
+    duck_gain: float = Field(default=0.2, ge=0, le=1)
     # A fast model decides whether each heard utterance was said to the robot (vs. people talking among
     # themselves). "" turns the check off; any failure or timeout counts as "yes".
     addressee_model: str = Field(default="claude-haiku-5-5", max_length=80)
@@ -102,6 +108,13 @@ class KioskConfig(BaseModel):
     leave_reset_s: int = Field(default=20, ge=0, le=600)
     # Let Claude ask the iPad for a photo of the customer (look_at_customer). Off: the camera stays on-device.
     customer_photos: bool = True
+    # While a pick runs, a fast vision model looks through the robot's cameras every few seconds and ends the
+    # episode early once the item is in the box, or once it has seen the pick fail this many checks in a row
+    # (so Claude can reset the arm and retry instead of waiting out the time limit). "" turns it off.
+    pick_watch_model: str = Field(default="claude-haiku-5-5", max_length=80)
+    pick_watch_after_s: int = Field(default=6, ge=1, le=120)  # first check, after the episode starts
+    pick_watch_every_s: int = Field(default=4, ge=1, le=60)
+    pick_watch_misses: int = Field(default=2, ge=1, le=10)
     items: list[Item] = Field(
         default_factory=lambda: [
             Item(
@@ -263,10 +276,18 @@ the alternative.
 unclear, ask. Tell them you are getting it as you start. Never start a second pick while one is running.
 - When a pick ends, look_at_table to see whether the cake is in the takeaway box. If it missed (the cake \
 is still on the table, tipped over, or the arm stopped short), tell the customer you will try again, call \
-reset_arm, then pick_item for the same item with retry=true (that corrects the inventory). After a second miss, \
-apologise, notify_owner, and say staff will help.
-- While a pick runs, keep chatting if spoken to; check_pick_status says how it is going. If the customer says \
-stop, or anything sounds unsafe, call stop_robot immediately.
+reset_arm, then pick_item for the same item with retry=true (that corrects the inventory). If the [Robot event] \
+says the camera already saw it miss, skip the look: tell the customer, reset_arm and pick_item again right away. \
+After a second miss, apologise, notify_owner, and say staff will help.
+- Once look_at_table shows the cake in the takeaway box, tell the customer the price and call request_payment \
+for that item: the card terminal lights up and they tap their card. You get a [Robot event] when it is paid \
+or declined. Paid: thank them and say the box is ready to take. Declined: say so kindly and offer to try \
+again (call request_payment again) or another card; after two declines, notify_owner and say staff will help.
+- While a pick runs, a camera watch checks it every few seconds and ends it early when the cake lands in the box \
+or the pick clearly fails, so you hear about it quickly. Keep chatting if spoken to; check_pick_status says how it \
+is going. If the customer says it is already in the box, or that it fell or the arm keeps missing, look_at_table \
+and call end_pick with what you see. If the customer says stop, or anything sounds unsafe, call stop_robot \
+immediately.
 - look_at_customer shows you the customer (the iPad's front camera). Use it when they point, gesture or \
 say "this one", not on every turn. Never comment on looks, age guesses or anything personal beyond what \
 helps serve them.
@@ -275,8 +296,8 @@ in one short sentence (for example, hand over the cake when a pick finishes).
 - If a tool reports the robot is not armed or another problem, explain briefly and offer to call staff \
 (notify_owner).
 - When the customer says goodbye or walks off, or asks to start over, say a short goodbye and call \
-clear_context so the next customer starts fresh.
-- Payment, allergies beyond the descriptions and anything you cannot do: say a staff member will help.
+clear_context so the next customer starts fresh (not while a payment is waiting).
+- Cash, refunds, allergies beyond the descriptions and anything you cannot do: say a staff member will help.
 {cfg.extra_instructions}""".strip()
 
 
@@ -347,13 +368,32 @@ TOOLS = [
         ["item_id"],
     ),
     _tool(
-        "check_pick_status", "How the current (or last) pick is going: state, seconds elapsed, time limit."
+        "check_pick_status",
+        "How the current (or last) pick is going: state, seconds elapsed, time limit, and what the camera "
+        "watch last saw (last_check).",
+    ),
+    _tool(
+        "end_pick",
+        "End the running pick now, before its time limit, without stopping or disarming the robot. Use it "
+        "when look_at_table shows the item is already in the takeaway box (outcome in_box), or the pick has "
+        "clearly failed: dropped, tipped over, knocked out of reach, or the arm keeps missing (outcome missed). "
+        "You get a [Robot event] when it has ended. For danger use stop_robot instead.",
+        {"outcome": {"type": "string", "enum": ["in_box", "missed"]}},
+        ["outcome"],
     ),
     _tool(
         "reset_arm",
         "Move both arms back to their starting pose (where they were when staff armed the robot). Use it "
         "after a pick that missed, before calling pick_item again, or when the arms are left in an odd "
         "position. Takes up to ~20 s and returns once the arms are home. Not while a pick is running.",
+    ),
+    _tool(
+        "request_payment",
+        "Show the price of an item the robot just put in the takeaway box on the card terminal and wait for "
+        "the customer to pay. Returns immediately; you get a [Robot event] when the payment is approved or "
+        "declined. Only after a successful pick of that item.",
+        {"item_id": {"type": "string", "description": "Item id from the catalog."}},
+        ["item_id"],
     ),
     _tool(
         "stop_robot",
@@ -415,6 +455,9 @@ class Pick(BaseModel):
     simulated: bool = False
     mode: Literal["job", "standby", "sim"] = "job"  # standby: one episode of the warm job
     retried: bool = False  # a retry already undid this pick's sale
+    # Set when the pick was ended before its time limit: by the camera watch or Claude's end_pick.
+    verdict: Literal["in_box", "missed"] | None = None
+    last_check: str = ""  # the camera watch's latest verdict, e.g. "trying: gripper holding the box"
 
     @property
     def active(self) -> bool:
@@ -423,6 +466,19 @@ class Pick(BaseModel):
     def summary(self) -> dict:
         now = self.ended_at or time.time()
         return {**self.model_dump(), "active": self.active, "elapsed_s": round(now - self.started_at)}
+
+
+class Payment(BaseModel):
+    """A mock card payment: shown on the fake terminal (/kiosk/terminal), where staff press approve or decline."""
+
+    id: str
+    item_id: str
+    item_name: str
+    amount: str
+    state: Literal["pending", "paid", "declined", "cancelled"] = "pending"
+    reason: str = ""
+    created_at: float
+    ended_at: float | None = None
 
 
 def pick_request(item: Item):
@@ -579,6 +635,24 @@ class Speaker:
 
 ADDRESSEE_TIMEOUT_S = 2.0
 _STOP_WORDS = re.compile(r"停|等一下|等等|暫停|不要了|stop|wait|hold on", re.I)
+REPEAT_WINDOW_S = 30.0  # customer speech this recent counts when looking for repeats
+# Customer speech heard while the robot was replying that didn't stop it goes into the history behind this.
+HEARD_PREFIX = "[While you were replying the customer also said this; it did not interrupt you. Take it into account, but don't repeat yourself:]"
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[\W_]+", "", text.lower())  # CJK characters count as word characters
+
+
+def is_repeat(text: str, earlier: list[str]) -> bool:
+    """The customer said (part of) the same thing again, usually because the reply hadn't started yet."""
+    a = _norm(text)
+    if not a:
+        return True
+    for b in map(_norm, earlier):
+        if b and ((len(a) >= 2 and a in b) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.6):
+            return True
+    return False
 
 
 class VisionSummary(BaseModel):
@@ -624,10 +698,21 @@ When unsure, answer yes.
 Recent conversation:
 {history}
 
-The robot {"was speaking" if robot_talking else "was silent"} when this was heard.{camera_line(vision)}
+The robot {"was still replying (thinking or speaking)" if robot_talking else "was silent"} when this was heard.\
+{camera_line(vision)}
 Latest utterance (speech recognition, may contain errors): {text}
 
-Answer with one word: yes or no."""
+{_BUSY_ANSWER if robot_talking else "Answer with one word: yes or no."}"""
+
+
+_BUSY_ANSWER = """The robot answers with a delay, so customers often repeat themselves or chime in while it replies. \
+Answer with one word:
+new: said to the robot and it must stop and listen: a new question or request, a change or correction, saying \
+no or stop, or something its reply has not covered.
+same: said to the robot but no need to stop: repeating or rephrasing what they already said, or a backchannel \
+while it talks (嗯, 好, 對, OK, 哈哈, 謝謝).
+no: not said to the robot.
+When unsure between new and same, answer new."""
 
 
 # ---------- the conversation ----------
@@ -638,6 +723,8 @@ class Session:
         self.messages: list[dict] = []
         self.clear_after_turn = False
         self.gate: asyncio.Future | None = None
+        self.said: deque[tuple[float, str]] = deque(maxlen=4)  # recent customer speech, for spotting repeats
+        self.heard: list[str] = []  # said during a reply without interrupting it (see _note)
         self._warmed = False
         self.present = False
         self.greeted_at = 0.0
@@ -652,6 +739,9 @@ class Session:
         self.state = "idle"
         self.pick: Pick | None = None
         self.pick_task: asyncio.Task | None = None
+        self.watch_task: asyncio.Task | None = None  # the camera watch of the running pick
+        self.payment: Payment | None = None
+        self.payments = 0  # payment requests in this conversation
         self.standby = Standby()
         self.standby_task: asyncio.Task | None = None
         self._standby_lock: asyncio.Lock | None = None
@@ -699,6 +789,7 @@ class Session:
         return {
             "type": "snapshot", "state": self.state, "log": list(self.log),
             "pick": self.pick.summary() if self.pick else None, "notifications": list(self.notifications),
+            "payment": self.payment.model_dump() if self.payment else None,
             "standby": self.standby.model_dump(),
             "config": store.load().model_dump(), "keys": keys_status(),
         }  # fmt: skip
@@ -715,22 +806,30 @@ class Session:
     ) -> None:
         """A customer utterance. From the mic, it only counts once the addressee check says it was for us:
         while the robot talks we wait for the check before interrupting; when it is quiet the reply starts
-        right away but holds its speech and tools until the check passes (the check is usually done first)."""
+        right away but holds its speech and tools until the check passes (the check is usually done first).
+        While a reply is under way, repeats and backchannels don't interrupt it: they go into the history."""
         text = text.strip()
         if not text:
             return
         cfg = store.load()
         if cfg.idle_reset_s and self.messages and time.time() - self.last_activity > cfg.idle_reset_s:
             await self.reset("new customer (idle)")
+        stop = bool(_STOP_WORDS.search(text))
+        talking = robot_talking or self._busy()
+        if mic and talking and not stop and is_repeat(text, self._recent_said()):
+            return await self._note(text, "repeat")
         check = None
-        if mic and cfg.addressee_model and not _STOP_WORDS.search(text) and not trusted(vision):
-            talking = robot_talking or bool(self.turn_task and not self.turn_task.done())
+        if mic and cfg.addressee_model and not stop and not trusted(vision):
             check = asyncio.create_task(self.addressed(cfg, text, talking, vision))
             if talking:
-                if not await check:
+                verdict = await check
+                if verdict == "no":
                     return await self._ignore(text)
+                if verdict == "same":
+                    return await self._note(text, "nothing new")
                 check = None
         self.last_activity = time.time()
+        self.said.append((time.time(), text))
         await self.interrupt("customer spoke")
         before = len(self.messages)
         self.messages.append({"role": "user", "content": text})
@@ -748,7 +847,7 @@ class Session:
         gate = asyncio.get_running_loop().create_future()
         self._start_turn(gate)
         task = self.turn_task
-        ok = await check
+        ok = await check != "no"
         if ok:
             await self.emit(
                 {
@@ -765,12 +864,38 @@ class Session:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            del self.messages[before:]
+            # Keep what the customer said meanwhile (it was flushed when the reply ended).
+            self.messages[before:] = [
+                m for m in self.messages[before + 1 :] if str(m["content"]).startswith(HEARD_PREFIX)
+            ]
+        self.said = deque((s for s in self.said if s[1] != text), maxlen=self.said.maxlen)
         await self._ignore(text)
+
+    def _busy(self) -> bool:
+        return bool(self.turn_task and not self.turn_task.done())
+
+    def _recent_said(self) -> list[str]:
+        return [t for at, t in self.said if time.time() - at < REPEAT_WINDOW_S]
+
+    async def _note(self, text: str, why: str) -> None:
+        """Heard while the robot replied, but no reason to cut it off: keep talking, remember it was said."""
+        self.last_activity = time.time()
+        self.said.append((time.time(), text))
+        self.heard.append(text)
+        await self.emit({"type": "noted", "text": text, "message": f"kept talking ({why}): {text}"})
+        if not self._busy():
+            self._flush_heard()
+
+    def _flush_heard(self) -> None:
+        if self.heard:
+            said = " ".join(f"「{t}」" for t in self.heard)
+            self.heard = []
+            self.messages.append({"role": "user", "content": f"{HEARD_PREFIX} {said}"})
 
     async def addressed(
         self, cfg: KioskConfig, text: str, robot_talking: bool, vision: VisionSummary | None = None
-    ) -> bool:
+    ) -> Literal["yes", "same", "no"]:
+        """yes: for the robot (when it was busy: stop it and listen); same: for it, but nothing new; no: not."""
         recent = []
         for m in self.messages:
             content = m["content"]
@@ -778,8 +903,13 @@ class Session:
                 said = content
             else:
                 said = " ".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
+            if said.startswith(HEARD_PREFIX):
+                who, said = "Customer (while the robot talked)", said[len(HEARD_PREFIX) :]
+            elif m["role"] == "user" and not said.startswith("["):
+                who = "Customer"
+            else:
+                who = "Robot"
             if said.strip():
-                who = "Customer" if m["role"] == "user" and not said.startswith("[") else "Robot"
                 recent.append(f"{who}: {clean_speech(_FACE_RE.sub('', said))[:200]}")
         started = time.time()
         try:
@@ -799,14 +929,15 @@ class Session:
                 ADDRESSEE_TIMEOUT_S,
             )
             answer = "".join(b.text for b in response.content if b.type == "text").strip().lower()
-            ok = not answer.startswith("no")
+            verdict = "no" if answer.startswith("no") else "same" if answer.startswith("same") else "yes"
         except Exception as e:  # noqa: BLE001 — fail open: better to answer side-talk than ignore a customer
             await self.emit({"type": "error", "where": "addressee", "message": f"{type(e).__name__}: {e}"})
-            return True
-        await self.emit(
-            {"type": "addressee", "text": text, "to_robot": ok, "duration_s": round(time.time() - started, 2)}
-        )
-        return ok
+            return "yes"
+        await self.emit({
+            "type": "addressee", "text": text, "to_robot": verdict != "no", "verdict": verdict,
+            "duration_s": round(time.time() - started, 2),
+        })  # fmt: skip
+        return verdict
 
     async def warm_up(self) -> None:
         """Open the connection the addressee check uses, so the first customer doesn't wait for it."""
@@ -845,7 +976,11 @@ class Session:
 
     async def _reset_after_leaving(self, delay: float) -> None:
         await asyncio.sleep(delay)
-        busy = (self.turn_task and not self.turn_task.done()) or (self.pick and self.pick.active)
+        busy = (
+            (self.turn_task and not self.turn_task.done())
+            or (self.pick and self.pick.active)
+            or (self.payment and self.payment.state == "pending")
+        )
         if not self.present and self.messages and not busy:  # mid-pick they are coming back for the cake
             await self.reset("customer left")
 
@@ -881,9 +1016,13 @@ class Session:
     async def reset(self, reason: str = "reset", keep_audio: bool = False) -> None:
         await self.interrupt(reason)
         self.messages = []
+        self.said.clear()
+        self.heard = []
         self.attempts = {}
+        self.payments = 0
         self.clear_after_turn = False
         await self.emit({"type": "reset", "reason": reason, "keep_audio": keep_audio})
+        await self.cancel_payment("conversation reset")
 
     async def _turn(self, turn: str) -> None:
         speaker = Speaker(self, turn)
@@ -942,6 +1081,7 @@ class Session:
             fallback.say("Sorry, my brain hiccupped. Could you say that again?")
             await fallback.finish()
         finally:
+            self._flush_heard()
             await self.set_state("idle")
 
     async def _stream(
@@ -1214,6 +1354,8 @@ class Session:
         await self.emit({"type": "pick", "pick": self.pick.summary()})
         if self.pick.mode != "standby":  # the standby watcher follows warm picks
             self.pick_task = asyncio.create_task(self._watch_pick(self.pick))
+        if self.pick.mode != "sim" and cfg.pick_watch_model and _hooks.get("camera_feed"):
+            self.watch_task = asyncio.create_task(self._watch_camera(self.pick))
         return (
             f"Started picking the {item.name} (up to {self.pick.time_limit_s} s). "
             "You will get a [Robot event] when it ends."
@@ -1265,6 +1407,15 @@ class Session:
             return "No pick has run in this conversation."
         return json.dumps(self.pick.summary(), ensure_ascii=False)
 
+    async def tool_end_pick(self, outcome: Literal["in_box", "missed"]) -> str:
+        pick = self.pick
+        if not pick or not pick.active:
+            return "No pick is running."
+        if pick.state == "stopping":
+            return "The pick is already ending."
+        await self._end_early(pick, outcome, "Claude ended it")
+        return f"Ending the {pick.item_name} pick now. You will get a [Robot event] when it has ended."
+
     async def tool_stop_robot(self) -> str:
         pick = self.pick
         if not pick or not pick.active:
@@ -1277,12 +1428,66 @@ class Session:
             raise ToolError(
                 f"The {self.pick.item_name} pick is still running; keep the conversation until it finishes."
             )
+        if self.payment and self.payment.state == "pending":
+            raise ToolError("A payment is still waiting on the terminal; wait for it to finish.")
         self.clear_after_turn = True
         return "The conversation will be forgotten after this reply. Say goodbye now; no more tool calls."
 
     async def tool_notify_owner(self, message: str, urgent: bool = False) -> str:
         await self.notify(message, urgent, source="robot")
         return "The owner has been notified."
+
+    async def tool_request_payment(self, item_id: str) -> str:
+        cfg = store.load()
+        item = next((i for i in cfg.items if i.id == item_id), None)
+        if item is None:
+            raise ToolError(f"No item with id {item_id}. Valid ids: {', '.join(i.id for i in cfg.items)}.")
+        if self.payment and self.payment.state == "pending":
+            raise ToolError(f"A payment of {self.payment.amount} is already waiting on the terminal.")
+        pick = self.pick
+        if not pick or pick.item_id != item.id or pick.state != "succeeded" or pick.retried:
+            raise ToolError(
+                f"The robot has not put a {item.name} in the box yet, so there is nothing to pay for."
+            )
+        if self.payment and self.payment.state == "paid" and self.payment.created_at >= pick.started_at:
+            raise ToolError(f"The {item.name} is already paid for.")
+        if self.payments >= MAX_PAYMENTS:
+            raise ToolError(
+                "The card was tried too many times. Apologise and ask staff to help (notify_owner)."
+            )
+        self.payments += 1
+        self.payment = Payment(
+            id=uuid.uuid4().hex[:8], item_id=item.id, item_name=item.name,
+            amount=item.price or "?", created_at=time.time(),
+        )  # fmt: skip
+        await self.emit({"type": "payment", "payment": self.payment.model_dump()})
+        return (
+            f"The card terminal is showing {self.payment.amount} for the {item.name}. Ask the customer to tap "
+            "their card; you will get a [Robot event] when it is paid or declined."
+        )
+
+    # -- payment lifecycle (the fake terminal at /kiosk/terminal answers)
+
+    async def payment_result(self, payment_id: str, ok: bool, reason: str = "") -> None:
+        p = self.payment
+        if not p or p.id != payment_id or p.state != "pending":
+            return  # stale button press (another terminal answered, or the conversation was reset)
+        p.state, p.reason, p.ended_at = ("paid" if ok else "declined"), reason[:200], time.time()
+        await self.emit({"type": "payment", "payment": p.model_dump()})
+        if ok:
+            text = f"The card payment of {p.amount} for the {p.item_name} was approved."
+        else:
+            text = (
+                f"The card payment of {p.amount} for the {p.item_name} was declined"
+                f"{' (' + p.reason + ')' if p.reason else ''}."
+            )
+        await self.robot_event(text)
+
+    async def cancel_payment(self, reason: str) -> None:
+        p = self.payment
+        if p and p.state == "pending":
+            p.state, p.reason, p.ended_at = "cancelled", reason, time.time()
+            await self.emit({"type": "payment", "payment": p.model_dump()})
 
     # -- pick lifecycle
 
@@ -1474,12 +1679,117 @@ class Session:
     async def end_episode(self) -> None:
         """Staff button: the cake is in the box, end the episode now instead of waiting for the time limit."""
         pick = self.pick
-        if pick and pick.active and pick.mode != "sim":
-            await asyncio.to_thread(
-                _hooks["gpu_call"], "POST", f"/jobs/{pick.job_id}/command", {"command": "end"}
-            )
-        elif pick and pick.active:
+        if pick and pick.active:
+            await self._end_early(pick, "in_box", "staff ended it")
+
+    async def _end_early(self, pick: Pick, verdict: Literal["in_box", "missed"], why: str) -> None:
+        """End the episode before its time limit (the arm stays armed); _pick_finished reacts to the verdict."""
+        if not pick.active or pick.verdict:
+            return
+        pick.verdict = verdict
+        pick.detail = why
+        if pick.mode == "sim":
             pick.time_limit_s = 0
+        else:
+            try:
+                await asyncio.to_thread(
+                    _hooks["gpu_call"], "POST", f"/jobs/{pick.job_id}/command", {"command": "end"}
+                )
+            except HTTPException as e:
+                pick.verdict, pick.detail = None, f"could not end early: {e.detail}"
+                await self.emit({"type": "error", "where": "end_pick", "message": pick.detail})
+                raise ToolError(f"The robot did not take the end command ({e.detail}).") from None
+        await self.emit({"type": "pick", "pick": pick.summary()})
+
+    async def _watch_camera(self, pick: Pick) -> None:
+        """Look at the table every few seconds while the episode runs: end it once the item is in the box, or
+        after several "failing" looks in a row, instead of letting a done or hopeless pick run to its limit."""
+        cfg = store.load()
+        item = next((i for i in cfg.items if i.id == pick.item_id), None)
+        running_since: float | None = None
+        last_look = 0.0
+        misses = 0
+        history: list[str] = []
+        while pick.active and not pick.verdict:
+            await asyncio.sleep(min(1.0, PICK_POLL_S))
+            if pick.state != "running":
+                continue
+            now = time.monotonic()
+            if running_since is None:
+                running_since = now
+            if now - running_since < cfg.pick_watch_after_s or now - last_look < cfg.pick_watch_every_s:
+                continue
+            last_look = now
+            started = time.time()
+            try:
+                frames = await self.tool_look_at_table("both")
+            except ToolError as e:
+                await self.emit(
+                    {"type": "error", "where": "pick_watch", "message": f"{e} (watch off for this pick)"}
+                )
+                return
+            elapsed = round(now - running_since)
+            verdict, reason = await self._judge_pick(cfg, pick, item, frames, history, elapsed)
+            if not pick.active or pick.verdict:
+                return
+            history.append(f"{elapsed}s: {verdict} ({reason})" if reason else f"{elapsed}s: {verdict}")
+            misses = misses + 1 if verdict == "failing" else 0
+            pick.last_check = f"{verdict}: {reason}" if reason else verdict
+            await self.emit({
+                "type": "pick_check", "item": pick.item_name, "verdict": verdict, "reason": reason,
+                "misses": misses, "elapsed_s": elapsed, "duration_s": round(time.time() - started, 2),
+            })  # fmt: skip
+            with contextlib.suppress(ToolError):
+                if verdict == "in_box":
+                    await self._end_early(pick, "in_box", f"camera saw it in the box: {reason}")
+                elif misses >= cfg.pick_watch_misses:
+                    await self._end_early(pick, "missed", f"camera saw it fail: {reason}")
+
+    async def _judge_pick(
+        self,
+        cfg: KioskConfig,
+        pick: Pick,
+        item: Item | None,
+        frames: list[dict],
+        history: list[str],
+        elapsed: int,
+    ) -> tuple[Literal["in_box", "trying", "failing"], str]:
+        """One look by the fast vision model. Any failure counts as "trying" (the pick just runs on)."""
+        where = f", normally {item.position}" if item and item.position else ""
+        task = item.task if item and item.task else f"Pick the {pick.item_name} and put it in the box"
+        earlier = "\n".join(history[-4:]) or "(none yet)"
+        prompt = f"""A two-armed robot is running a learned policy to pick up the {pick.item_name}{where} and put it \
+into the open cardboard takeaway box in the middle of the table (task: "{task}"). These are live photos from its \
+cameras, {elapsed} s into the pick (time limit {pick.time_limit_s} s).
+
+Earlier looks:
+{earlier}
+
+Answer with one word, a colon, and a reason of at most 12 words:
+in_box: the {pick.item_name} rests inside the takeaway box and the grippers have let go of it.
+trying: anything that may still work: reaching, grasping, holding or carrying it, adjusting, regrasping after a slip.
+failing: it cannot work without starting over: the item fell off the table, tipped over or was knocked out of \
+reach, it was dropped outside the box, or the arms are stuck, idle, or keep closing on nothing away from it.
+When unsure, answer trying."""
+        try:
+            response = await asyncio.wait_for(
+                self.anthropic().messages.create(
+                    model=cfg.pick_watch_model,
+                    max_tokens=40,
+                    thinking={"type": "disabled"},
+                    output_config={"effort": "low"},
+                    messages=[{"role": "user", "content": [*frames, {"type": "text", "text": prompt}]}],
+                ),
+                PICK_WATCH_TIMEOUT_S,
+            )
+        except Exception as e:  # noqa: BLE001
+            await self.emit({"type": "error", "where": "pick_watch", "message": f"{type(e).__name__}: {e}"})
+            return "trying", ""
+        answer = "".join(b.text for b in response.content if b.type == "text").strip()
+        word, _, reason = answer.partition(":")
+        word = word.strip().lower()
+        verdict = word if word in ("in_box", "failing") else "trying"
+        return verdict, clean_speech(reason).strip()[:120]
 
     async def _watch_pick(self, pick: Pick) -> None:
         failures = 0
@@ -1519,7 +1829,20 @@ class Session:
 
     async def _pick_finished(self, pick: Pick) -> None:
         took = round(pick.ended_at - pick.started_at) if pick.ended_at else None
-        if pick.state == "succeeded":
+        if pick.state == "succeeded" and pick.verdict == "missed":
+            # Ended early because it failed: nothing was sold, the item is still on the table.
+            left = MAX_ATTEMPTS - self.attempts.get(pick.item_id, 0)
+            text = (
+                f"The pick of the {pick.item_name} was ended after {took} s because it failed ({pick.detail}). "
+                "Nothing was sold; the inventory still counts it on the table. "
+                + (
+                    "Tell the customer you will try again, call reset_arm, then pick_item the same item (no "
+                    "retry flag needed)."
+                    if left > 0
+                    else "No tries are left: apologise, notify_owner, and say staff will help."
+                )
+            )
+        elif pick.state == "succeeded":
             cfg = store.load()
             item = next((i for i in cfg.items if i.id == pick.item_id), None)
             if item:
@@ -1538,10 +1861,11 @@ class Session:
                     )
                 else:
                     await self.notify(f"{item.name} is now sold out.", urgent=True)
+            early = f" ({pick.detail})" if pick.verdict == "in_box" else ""
             text = (
-                f"The pick of the {pick.item_name} finished after {took} s and the inventory counts it as sold. "
-                "look_at_table to check it is in the takeaway box; if it missed, reset_arm and pick_item it again "
-                "with retry=true (that undoes the sale)."
+                f"The pick of the {pick.item_name} finished after {took} s{early} and the inventory counts it as "
+                "sold. look_at_table to check it is in the takeaway box; if it is, request_payment; if it missed, "
+                "reset_arm and pick_item it again with retry=true (that undoes the sale)."
             )
         elif pick.state == "stopped":
             text = f"The pick of the {pick.item_name} was stopped after {took} s. The arm is holding still."
@@ -1651,6 +1975,12 @@ async def kiosk_ws(ws: WebSocket) -> None:
                 asyncio.create_task(session.interrupt("barge-in"))
             elif kind == "reset":
                 asyncio.create_task(session.reset())
+            elif kind == "payment_result":
+                asyncio.create_task(
+                    session.payment_result(
+                        str(msg.get("id", "")), bool(msg.get("ok")), str(msg.get("reason") or "")
+                    )
+                )
             elif kind == "stop_robot":
                 asyncio.create_task(session.stop_pick())
             elif kind == "end_episode":
